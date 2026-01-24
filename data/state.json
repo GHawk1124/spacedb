@@ -1,0 +1,13 @@
+{
+  "gcat": {
+    "last_fetch": "2026-01-23T19:45:32.823904Z"
+  },
+  "spacetrack": {
+    "last_satcat_fetch": "2026-01-23T19:45:43.992288Z",
+    "last_gp_fetch": "2026-01-23T19:46:10.400728Z"
+  },
+  "discos": {
+    "last_fetch": "2026-01-23T19:55:56.889646Z",
+    "cached_count": 67401
+  }
+}
