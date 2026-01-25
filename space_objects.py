@@ -321,8 +321,18 @@ def update_spacetrack(
         log.warning(
             "Space-Track: missing SPACETRACK_USER/PASS; skipping (using cache if present)."
         )
-        satcat = gzip_read_json(ST_SATCAT_CACHE) if ST_SATCAT_CACHE.exists() else []
-        gp = gzip_read_json(ST_GP_CACHE) if ST_GP_CACHE.exists() else []
+        satcat: List[Dict[str, Any]] = []
+        gp: List[Dict[str, Any]] = []
+        try:
+            if ST_SATCAT_CACHE.exists():
+                satcat = gzip_read_json(ST_SATCAT_CACHE)
+        except Exception as e:
+            log.warning(f"Space-Track: failed to read SATCAT cache: {e}")
+        try:
+            if ST_GP_CACHE.exists():
+                gp = gzip_read_json(ST_GP_CACHE)
+        except Exception as e:
+            log.warning(f"Space-Track: failed to read GP cache: {e}")
         return satcat, gp
 
     st_state = state.setdefault("spacetrack", {})

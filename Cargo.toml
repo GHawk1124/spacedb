@@ -1,0 +1,56 @@
+[package]
+name = "spacedb"
+version = "0.1.0"
+edition = "2021"
+description = "Space object database visualizer with orbital mechanics"
+license = "MIT"
+
+[dependencies]
+# GUI framework with proper platform features
+eframe = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wgpu",
+    "x11",
+    "wayland",
+] }
+egui = "0.33"
+egui-wgpu = "0.33"
+wgpu = "27"
+
+# Orbital mechanics
+satkit = "0.9"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Compression (for gzipped indexes)
+flate2 = "1.0"
+
+# Image/texture loading
+image = { version = "0.25", features = ["jpeg", "png", "tiff", "hdr"] }
+
+# 3D math
+nalgebra = "0.33"
+glam = { version = "0.29", features = ["bytemuck"] }
+
+# GPU buffer utilities
+bytemuck = { version = "1.0", features = ["derive"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Misc utilities
+anyhow = "1.0"
+thiserror = "2.0"
+parking_lot = "0.12"
+chrono = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev]
+opt-level = 1
