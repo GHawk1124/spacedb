@@ -3,8 +3,8 @@
 //! A 3D visualization tool for tracking satellites and space debris
 //! using data from multiple sources including Space-Track, GCAT, and DISCOS.
 
-mod data;
 mod analysis;
+mod data;
 mod propagation;
 mod renderer;
 mod ui;
@@ -144,6 +144,8 @@ pub struct SpaceDbApp {
     active_velocity_filter: VelocityFilter,
     active_altitude_filter: ui::AltitudeFilter,
     active_tle_age_filter: ui::TleAgeFilter,
+    velocity_thresholds: (Option<f32>, Option<f32>),
+    velocity_thresholds_dirty: bool,
     sgp4_worker: Option<Sgp4Worker>,
 
     // 3D Renderer state
@@ -245,6 +247,8 @@ impl SpaceDbApp {
             active_velocity_filter,
             active_altitude_filter,
             active_tle_age_filter,
+            velocity_thresholds: (None, None),
+            velocity_thresholds_dirty: true,
             sgp4_worker: None,
             wgpu_initialized,
             last_frame_time: std::time::Instant::now(),
@@ -271,6 +275,7 @@ impl SpaceDbApp {
         self.active_tle_age_filter = self.search_panel.tle_age_filter.clone();
         self.dynamic_filter_ready = false;
         self.filtered_norad_dynamic_set = self.filtered_norad_set.clone();
+        self.velocity_thresholds_dirty = true;
 
         self.filtered_norad_ids =
             build_filtered_ids(&self.database, &self.search_index, &self.active_filter);
@@ -357,21 +362,17 @@ impl SpaceDbApp {
         if let Some(result) = latest_result {
             self.satellite_states = result.states;
             self.last_states_time = Some(result.time);
-            self.rebuild_satellite_instances();
+            self.velocity_thresholds_dirty = true;
         }
     }
 
-    fn rebuild_satellite_instances(&mut self) {
-        let velocity_filter = &self.active_velocity_filter;
-        let altitude_filter = &self.active_altitude_filter;
-        let tle_age_filter = &self.active_tle_age_filter;
-        let mut min_speed = velocity_filter.min_kms;
-        let mut max_speed = velocity_filter.max_kms;
-        if max_speed < min_speed {
-            std::mem::swap(&mut min_speed, &mut max_speed);
+    fn update_velocity_thresholds(&mut self) {
+        if !self.velocity_thresholds_dirty {
+            return;
         }
 
-        let (low_threshold, high_threshold) = if velocity_filter.enabled
+        let velocity_filter = &self.active_velocity_filter;
+        let thresholds = if velocity_filter.enabled
             && (velocity_filter.slow_percent > 0.0 || velocity_filter.fast_percent > 0.0)
             && !self.satellite_states.is_empty()
         {
@@ -406,9 +407,30 @@ impl SpaceDbApp {
             (None, None)
         };
 
-        let current_time = *self.propagator.current_time();
-        let dt = if let Some(last_time) = self.last_states_time {
-            current_time.as_unixtime() - last_time.as_unixtime()
+        self.velocity_thresholds = thresholds;
+        self.velocity_thresholds_dirty = false;
+    }
+
+    fn rebuild_satellite_instances(&mut self) {
+        self.update_velocity_thresholds();
+        let (low_threshold, high_threshold) = self.velocity_thresholds;
+
+        let velocity_filter = &self.active_velocity_filter;
+        let altitude_filter = &self.active_altitude_filter;
+        let tle_age_filter = &self.active_tle_age_filter;
+        let mut min_speed = velocity_filter.min_kms;
+        let mut max_speed = velocity_filter.max_kms;
+        if max_speed < min_speed {
+            std::mem::swap(&mut min_speed, &mut max_speed);
+        }
+
+        let dt = if self.time_controls.playing {
+            let current_time = *self.propagator.current_time();
+            if let Some(last_time) = self.last_states_time {
+                current_time.as_unixtime() - last_time.as_unixtime()
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
@@ -937,6 +959,9 @@ impl eframe::App for SpaceDbApp {
         // Update satellite positions via SGP4 worker
         if self.time_controls.compute_satellites {
             self.process_sgp4_worker(frame_time);
+            if !self.satellite_states.is_empty() {
+                self.rebuild_satellite_instances();
+            }
             // Update orbit track if selected
             self.update_orbit_track(time_delta);
         } else {
