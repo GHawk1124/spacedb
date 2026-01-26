@@ -300,6 +300,12 @@ impl DetailPanel {
                     ui.end_row();
                 }
 
+                if let Some(kind) = &obj.analyst_kind {
+                    ui.label("Analyst kind:");
+                    ui.label(kind);
+                    ui.end_row();
+                }
+
                 if let Some(country) = &obj.country {
                     ui.label("Country:");
                     ui.label(country);
@@ -317,6 +323,32 @@ impl DetailPanel {
                     ui.colored_label(Color32::from_rgb(200, 100, 100), decay);
                     ui.end_row();
                 }
+
+                ui.label("In SATCAT:");
+                ui.label(if obj.in_satcat { "Yes" } else { "No" });
+                ui.end_row();
+
+                ui.label("Sources:");
+                let mut sources = Vec::new();
+                if obj.sources.spacetrack_satcat {
+                    sources.push("Space-Track SATCAT");
+                }
+                if obj.sources.spacetrack_gp {
+                    sources.push("Space-Track GP");
+                }
+                if obj.sources.gcat {
+                    sources.push("GCAT");
+                }
+                if obj.sources.discos {
+                    sources.push("DISCOS");
+                }
+                let sources_text = if sources.is_empty() {
+                    "Unknown".to_string()
+                } else {
+                    sources.join(", ")
+                };
+                ui.label(sources_text);
+                ui.end_row();
             });
 
         // TLE information
@@ -365,6 +397,30 @@ impl DetailPanel {
                 .num_columns(2)
                 .spacing([10.0, 4.0])
                 .show(ui, |ui| {
+                    if let Some(name) = &discos.name {
+                        ui.label("DISCOS name:");
+                        ui.label(name);
+                        ui.end_row();
+                    }
+
+                    if let Some(class) = &discos.object_class {
+                        ui.label("Object class:");
+                        ui.label(class);
+                        ui.end_row();
+                    }
+
+                    if let Some(cospar) = &discos.cospar_id {
+                        ui.label("DISCOS COSPAR:");
+                        ui.label(cospar);
+                        ui.end_row();
+                    }
+
+                    if let Some(satno) = discos.satno {
+                        ui.label("DISCOS SATNO:");
+                        ui.label(format!("{}", satno));
+                        ui.end_row();
+                    }
+
                     if let Some(mass) = discos.mass {
                         ui.label("Mass:");
                         ui.label(format!("{:.1} kg", mass));
@@ -377,13 +433,50 @@ impl DetailPanel {
                         ui.end_row();
                     }
 
-                    let (w, h, d) = discos.dimensions();
-                    ui.label("Dimensions:");
-                    ui.label(format!("{:.2} x {:.2} x {:.2} m", w, h, d));
-                    ui.end_row();
+                    if let Some(width) = discos.width {
+                        ui.label("Width:");
+                        ui.label(format!("{:.2} m", width));
+                        ui.end_row();
+                    }
+
+                    if let Some(height) = discos.height {
+                        ui.label("Height:");
+                        ui.label(format!("{:.2} m", height));
+                        ui.end_row();
+                    }
+
+                    if let Some(depth) = discos.depth {
+                        ui.label("Depth:");
+                        ui.label(format!("{:.2} m", depth));
+                        ui.end_row();
+                    }
+
+                    if let Some(diameter) = discos.diameter {
+                        ui.label("Diameter:");
+                        ui.label(format!("{:.2} m", diameter));
+                        ui.end_row();
+                    }
+
+                    if let Some(span) = discos.span {
+                        ui.label("Span:");
+                        ui.label(format!("{:.2} m", span));
+                        ui.end_row();
+                    }
+
+                    if let Some(xsect) = discos.x_sect_min {
+                        ui.label("Cross-section min:");
+                        ui.label(format!("{:.2} m²", xsect));
+                        ui.end_row();
+                    }
 
                     if let Some(xsect) = discos.x_sect_avg {
-                        ui.label("Cross-section:");
+                        ui.label("Cross-section avg:");
+                        ui.label(format!("{:.2} m²", xsect));
+                        ui.end_row();
+                    }
+
+                    if let Some(xsect) = discos.x_sect_max {
+                        ui.label("Cross-section max:");
                         ui.label(format!("{:.2} m²", xsect));
                         ui.end_row();
                     }
