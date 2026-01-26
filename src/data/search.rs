@@ -109,12 +109,31 @@ impl SearchIndex {
 }
 
 /// Filter criteria for object browser
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ObjectFilter {
     pub object_types: Vec<String>,
     pub countries: Vec<String>,
     pub has_tle_only: bool,
     pub exclude_decayed: bool,
+    pub size_filter_enabled: bool,
+    pub size_min_m: f64,
+    pub size_max_m: f64,
+    pub include_unknown_size: bool,
+}
+
+impl Default for ObjectFilter {
+    fn default() -> Self {
+        Self {
+            object_types: Vec::new(),
+            countries: Vec::new(),
+            has_tle_only: false,
+            exclude_decayed: false,
+            size_filter_enabled: false,
+            size_min_m: 0.0,
+            size_max_m: 0.0,
+            include_unknown_size: true,
+        }
+    }
 }
 
 impl ObjectFilter {
@@ -144,6 +163,22 @@ impl ObjectFilter {
         // Decayed filter
         if self.exclude_decayed && obj.is_decayed() {
             return false;
+        }
+
+        // Size filter (requires DISCOS data)
+        if self.size_filter_enabled {
+            if let Some(discos) = &obj.discos {
+                let (w, h, d) = discos.dimensions();
+                let size_m = w.max(h).max(d);
+                if self.size_min_m > 0.0 && size_m < self.size_min_m {
+                    return false;
+                }
+                if self.size_max_m > 0.0 && size_m > self.size_max_m {
+                    return false;
+                }
+            } else if !self.include_unknown_size {
+                return false;
+            }
         }
 
         // TODO: Altitude filtering requires propagation

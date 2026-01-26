@@ -10,16 +10,41 @@ pub struct SearchPanel {
     pub results: Vec<u32>,
     pub filter: ObjectFilter,
     pub show_filters: bool,
+    pub velocity_filter: VelocityFilter,
+}
+
+/// Velocity filtering controls (km/s)
+#[derive(Debug, Clone)]
+pub struct VelocityFilter {
+    pub enabled: bool,
+    pub min_kms: f32,
+    pub max_kms: f32,
+    pub slow_percent: f32,
+    pub fast_percent: f32,
+}
+
+impl Default for VelocityFilter {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_kms: 0.0,
+            max_kms: 15.0,
+            slow_percent: 0.0,
+            fast_percent: 0.0,
+        }
+    }
 }
 
 impl SearchPanel {
-    pub fn show(&mut self, ui: &mut Ui, index: &SearchIndex) {
+    pub fn show(&mut self, ui: &mut Ui, index: &SearchIndex) -> bool {
+        let mut changed = false;
         ui.heading("Search");
 
         // Search box
         let response = ui.text_edit_singleline(&mut self.query);
         if response.changed() {
             self.results = index.search(&self.query, 100);
+            changed = true;
         }
 
         // Filter toggle
@@ -32,17 +57,117 @@ impl SearchPanel {
             .clicked()
         {
             self.show_filters = !self.show_filters;
+            changed = true;
         }
 
         if self.show_filters {
             ui.separator();
-            ui.checkbox(&mut self.filter.has_tle_only, "Has TLE only");
-            ui.checkbox(&mut self.filter.exclude_decayed, "Exclude decayed");
+            if ui
+                .checkbox(&mut self.filter.has_tle_only, "Has TLE only")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .checkbox(&mut self.filter.exclude_decayed, "Exclude decayed")
+                .changed()
+            {
+                changed = true;
+            }
+
+            ui.separator();
+            ui.label("Object types:");
+            changed |= toggle_object_type(ui, &mut self.filter, "Payload", "PAYLOAD");
+            changed |= toggle_object_type(ui, &mut self.filter, "Rocket Body", "ROCKET BODY");
+            changed |= toggle_object_type(ui, &mut self.filter, "Debris", "DEBRIS");
+
+            ui.separator();
+            if ui
+                .checkbox(&mut self.filter.size_filter_enabled, "Size filter (meters)")
+                .changed()
+            {
+                if self.filter.size_filter_enabled && self.filter.size_max_m <= 0.0 {
+                    self.filter.size_max_m = 100.0;
+                }
+                changed = true;
+            }
+            if self.filter.size_filter_enabled {
+                let min_resp = ui
+                    .add(egui::Slider::new(&mut self.filter.size_min_m, 0.0..=100.0).text("Min m"));
+                let max_resp = ui
+                    .add(egui::Slider::new(&mut self.filter.size_max_m, 0.0..=100.0).text("Max m"));
+                if min_resp.changed() || max_resp.changed() {
+                    changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut self.filter.include_unknown_size,
+                        "Include unknown size",
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            }
+
+            ui.separator();
+            if ui
+                .checkbox(&mut self.velocity_filter.enabled, "Velocity filter (km/s)")
+                .changed()
+            {
+                if self.velocity_filter.enabled && self.velocity_filter.max_kms <= 0.0 {
+                    self.velocity_filter.max_kms = 15.0;
+                }
+                changed = true;
+            }
+            if self.velocity_filter.enabled {
+                let min_resp = ui.add(
+                    egui::Slider::new(&mut self.velocity_filter.min_kms, 0.0..=15.0)
+                        .text("Min km/s"),
+                );
+                let max_resp = ui.add(
+                    egui::Slider::new(&mut self.velocity_filter.max_kms, 0.0..=15.0)
+                        .text("Max km/s"),
+                );
+                let slow_resp = ui.add(
+                    egui::Slider::new(&mut self.velocity_filter.slow_percent, 0.0..=100.0)
+                        .text("Slowest %"),
+                );
+                let fast_resp = ui.add(
+                    egui::Slider::new(&mut self.velocity_filter.fast_percent, 0.0..=100.0)
+                        .text("Fastest %"),
+                );
+                if min_resp.changed()
+                    || max_resp.changed()
+                    || slow_resp.changed()
+                    || fast_resp.changed()
+                {
+                    changed = true;
+                }
+            }
         }
 
         ui.separator();
         ui.label(format!("{} results", self.results.len()));
+
+        changed
     }
+}
+
+fn toggle_object_type(ui: &mut Ui, filter: &mut ObjectFilter, label: &str, value: &str) -> bool {
+    let mut enabled = filter.object_types.iter().any(|t| t == value);
+    let response = ui.checkbox(&mut enabled, label);
+    if response.changed() {
+        if enabled {
+            if !filter.object_types.iter().any(|t| t == value) {
+                filter.object_types.push(value.to_string());
+            }
+        } else {
+            filter.object_types.retain(|t| t != value);
+        }
+        return true;
+    }
+    false
 }
 
 /// Object browser panel
@@ -55,22 +180,18 @@ impl BrowserPanel {
         ui: &mut Ui,
         db: &SpaceObjectDatabase,
         results: &[u32],
-        filter: &ObjectFilter,
         selected: Option<u32>,
     ) -> Option<u32> {
         let mut new_selection = None;
 
+        let row_height = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for &norad_id in results {
+            .show_rows(ui, row_height, results.len(), |ui, row_range| {
+                for row in row_range {
+                    let norad_id = results[row];
                     let norad_str = norad_id.to_string();
                     if let Some(obj) = db.objects.get(&norad_str) {
-                        // Apply filter
-                        if !filter.matches(obj) {
-                            continue;
-                        }
-
                         let is_selected = selected == Some(norad_id);
                         let name = obj.display_name();
 

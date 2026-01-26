@@ -70,6 +70,19 @@ impl Propagator {
         &self.current_time
     }
 
+    /// Set current simulation time
+    pub fn set_time(&mut self, time: satkit::Instant) {
+        self.current_time = time;
+    }
+
+    /// Clone propagator for background worker use
+    pub fn clone_for_worker(&self) -> Self {
+        Self {
+            tles: self.tles.clone(),
+            current_time: self.current_time,
+        }
+    }
+
     /// Advance time by delta seconds
     pub fn advance_time(&mut self, delta_seconds: f64) {
         self.current_time = self.current_time + satkit::Duration::from_seconds(delta_seconds);
@@ -155,6 +168,19 @@ impl Propagator {
         let mut results = HashMap::with_capacity(self.tles.len());
 
         for &norad_id in self.tles.keys() {
+            if let Some(state) = self.propagate(norad_id) {
+                results.insert(norad_id, state);
+            }
+        }
+
+        results
+    }
+
+    /// Propagate a subset of satellites and return positions
+    pub fn propagate_subset(&self, ids: &[u32]) -> HashMap<u32, SatelliteState> {
+        let mut results = HashMap::with_capacity(ids.len());
+
+        for &norad_id in ids {
             if let Some(state) = self.propagate(norad_id) {
                 results.insert(norad_id, state);
             }

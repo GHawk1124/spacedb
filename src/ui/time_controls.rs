@@ -15,6 +15,10 @@ pub struct TimeControls {
     pub speed_index: usize,
     /// Orbit track resolution (points per orbit)
     pub orbit_points: u32,
+    /// SGP4 update rate (Hz)
+    pub sgp4_update_hz: f32,
+    /// UI max FPS cap
+    pub max_fps: f32,
     /// Show satellites in the renderer
     pub show_satellites: bool,
     /// Compute satellite propagation each frame
@@ -29,6 +33,8 @@ impl Default for TimeControls {
             speed_presets: vec![-100.0, -10.0, -1.0, 0.0, 1.0, 10.0, 100.0, 1000.0, 10000.0],
             speed_index: 4, // 1x
             orbit_points: 360,
+            sgp4_update_hz: 5.0,
+            max_fps: 120.0,
             show_satellites: true,
             compute_satellites: true,
         }
@@ -89,6 +95,12 @@ impl TimeControls {
             ui.label("Satellites:");
             ui.checkbox(&mut self.show_satellites, "Show");
             ui.checkbox(&mut self.compute_satellites, "Compute");
+            ui.separator();
+            ui.label("SGP4 Hz:");
+            ui.add(egui::Slider::new(&mut self.sgp4_update_hz, 1.0..=20.0));
+            ui.separator();
+            ui.label("Max FPS:");
+            ui.add(egui::Slider::new(&mut self.max_fps, 20.0..=500.0));
         });
     }
 

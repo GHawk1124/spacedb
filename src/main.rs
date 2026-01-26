@@ -10,19 +10,81 @@ mod ui;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::thread;
 
 use anyhow::Result;
 use eframe::egui;
 use glam::Vec3;
 
 use data::{load_complete_database, DatabaseStats, SearchIndex, SpaceObjectDatabase};
-use propagation::{generate_orbit_track_from_tle, Propagator, EARTH_RADIUS_KM};
+use propagation::{generate_orbit_track_from_tle, Propagator, SatelliteState, EARTH_RADIUS_KM};
 use renderer::{
     altitude_to_color, Camera, OrbitVertex, SatelliteInstance, SceneCallback, SceneRenderData,
     SceneRenderResources,
 };
 use ui::{BrowserPanel, DetailPanel, SearchPanel, TimeControls};
+
+#[derive(Debug)]
+enum Sgp4Command {
+    SetIds(Vec<u32>),
+    Propagate { time: satkit::Instant },
+    Stop,
+}
+
+#[derive(Debug)]
+struct Sgp4Result {
+    time: satkit::Instant,
+    states: HashMap<u32, SatelliteState>,
+}
+
+struct Sgp4Worker {
+    sender: Sender<Sgp4Command>,
+    receiver: Receiver<Sgp4Result>,
+    _handle: thread::JoinHandle<()>,
+}
+
+impl Sgp4Worker {
+    fn new(mut propagator: Propagator) -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Sgp4Command>();
+        let (result_tx, result_rx) = mpsc::channel::<Sgp4Result>();
+
+        let handle = thread::spawn(move || {
+            let mut current_ids: Vec<u32> = Vec::new();
+
+            while let Ok(command) = cmd_rx.recv() {
+                match command {
+                    Sgp4Command::SetIds(ids) => {
+                        current_ids = ids;
+                    }
+                    Sgp4Command::Propagate { time } => {
+                        if current_ids.is_empty() {
+                            let _ = result_tx.send(Sgp4Result {
+                                time,
+                                states: HashMap::new(),
+                            });
+                            continue;
+                        }
+
+                        propagator.set_time(time);
+                        let states = propagator.propagate_subset(&current_ids);
+                        if result_tx.send(Sgp4Result { time, states }).is_err() {
+                            break;
+                        }
+                    }
+                    Sgp4Command::Stop => break,
+                }
+            }
+        });
+
+        Self {
+            sender: cmd_tx,
+            receiver: result_rx,
+            _handle: handle,
+        }
+    }
+}
 
 /// Application state
 pub struct SpaceDbApp {
@@ -45,11 +107,23 @@ pub struct SpaceDbApp {
     camera_drag: Option<egui::Pos2>,
 
     // Cached satellite instances for rendering
-    satellite_instances: Vec<SatelliteInstance>,
+    satellite_instances: Arc<Vec<SatelliteInstance>>,
     satellite_positions: HashMap<u32, Vec3>,
+    satellite_states: HashMap<u32, SatelliteState>,
+    satellite_update_accumulator: f64,
+    last_states_time: Option<satkit::Instant>,
 
     // Selected object orbit track
-    orbit_track: Vec<OrbitVertex>,
+    orbit_track: Arc<Vec<OrbitVertex>>,
+    orbit_track_update_accumulator: f64,
+    last_orbit_target: Option<u32>,
+    last_orbit_points: u32,
+
+    // Filtering and worker state
+    filtered_norad_ids: Vec<u32>,
+    last_object_filter_signature: u64,
+    last_velocity_filter_signature: u64,
+    sgp4_worker: Option<Sgp4Worker>,
 
     // 3D Renderer state
     wgpu_initialized: bool,
@@ -57,6 +131,7 @@ pub struct SpaceDbApp {
     // Frame timing
     last_frame_time: std::time::Instant,
     last_log_time: std::time::Instant,
+    last_frame_delta: f64,
 }
 
 impl SpaceDbApp {
@@ -124,24 +199,249 @@ impl SpaceDbApp {
             selected_object: None,
             camera: Camera::default(),
             camera_drag: None,
-            satellite_instances: Vec::new(),
+            satellite_instances: Arc::new(Vec::new()),
             satellite_positions: HashMap::new(),
-            orbit_track: Vec::new(),
+            satellite_states: HashMap::new(),
+            satellite_update_accumulator: 0.0,
+            last_states_time: None,
+            orbit_track: Arc::new(Vec::new()),
+            orbit_track_update_accumulator: 0.0,
+            last_orbit_target: None,
+            last_orbit_points: 0,
+            filtered_norad_ids: Vec::new(),
+            last_object_filter_signature: 0,
+            last_velocity_filter_signature: 0,
+            sgp4_worker: None,
             wgpu_initialized,
             last_frame_time: std::time::Instant::now(),
             last_log_time: std::time::Instant::now(),
+            last_frame_delta: 0.0,
         })
     }
 
-    fn update_satellite_positions(&mut self) {
-        // Propagate all satellites using SGP4
-        let states = self.propagator.propagate_all();
+    fn ensure_sgp4_worker(&mut self) {
+        if self.sgp4_worker.is_none() {
+            self.sgp4_worker = Some(Sgp4Worker::new(self.propagator.clone_for_worker()));
+            self.last_object_filter_signature = 0;
+        }
+    }
 
-        self.satellite_instances.clear();
+    fn object_filter_signature(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        self.search_panel.query.hash(&mut hasher);
+        self.search_panel.filter.has_tle_only.hash(&mut hasher);
+        self.search_panel.filter.exclude_decayed.hash(&mut hasher);
+        self.search_panel
+            .filter
+            .size_filter_enabled
+            .hash(&mut hasher);
+        self.search_panel
+            .filter
+            .include_unknown_size
+            .hash(&mut hasher);
+        self.search_panel
+            .filter
+            .size_min_m
+            .to_bits()
+            .hash(&mut hasher);
+        self.search_panel
+            .filter
+            .size_max_m
+            .to_bits()
+            .hash(&mut hasher);
+
+        let mut types = self.search_panel.filter.object_types.clone();
+        types.sort();
+        for t in types {
+            t.hash(&mut hasher);
+        }
+
+        let mut countries = self.search_panel.filter.countries.clone();
+        countries.sort();
+        for c in countries {
+            c.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn refresh_filtered_ids(&mut self) -> bool {
+        let signature = self.object_filter_signature();
+        if signature != self.last_object_filter_signature {
+            self.rebuild_filtered_ids();
+            self.last_object_filter_signature = signature;
+            return true;
+        }
+        false
+    }
+
+    fn velocity_filter_signature(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        let filter = &self.search_panel.velocity_filter;
+        filter.enabled.hash(&mut hasher);
+        filter.min_kms.to_bits().hash(&mut hasher);
+        filter.max_kms.to_bits().hash(&mut hasher);
+        filter.slow_percent.to_bits().hash(&mut hasher);
+        filter.fast_percent.to_bits().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn rebuild_filtered_ids(&mut self) {
+        let mut ids = Vec::new();
+
+        for &norad_id in &self.search_panel.results {
+            let norad_str = norad_id.to_string();
+            if let Some(obj) = self.database.objects.get(&norad_str) {
+                if self.search_panel.filter.matches(obj) {
+                    ids.push(norad_id);
+                }
+            }
+        }
+
+        self.filtered_norad_ids = ids;
+    }
+
+    fn process_sgp4_worker(&mut self, frame_time: f64) {
+        self.ensure_sgp4_worker();
+
+        let update_hz = self.time_controls.sgp4_update_hz.clamp(1.0, 20.0) as f64;
+        let update_interval = 1.0 / update_hz;
+
+        if self.refresh_filtered_ids() {
+            if let Some(worker) = &self.sgp4_worker {
+                let _ = worker
+                    .sender
+                    .send(Sgp4Command::SetIds(self.filtered_norad_ids.clone()));
+            }
+            self.satellite_update_accumulator = update_interval;
+        }
+
+        let velocity_signature = self.velocity_filter_signature();
+        let velocity_filter_changed = velocity_signature != self.last_velocity_filter_signature;
+        if velocity_filter_changed {
+            self.last_velocity_filter_signature = velocity_signature;
+        }
+
+        self.satellite_update_accumulator += frame_time.max(0.0);
+
+        if self.satellite_update_accumulator >= update_interval {
+            let time = *self.propagator.current_time();
+            if let Some(worker) = &self.sgp4_worker {
+                let _ = worker.sender.send(Sgp4Command::Propagate { time });
+            }
+            self.satellite_update_accumulator = 0.0;
+        }
+
+        let mut latest_result = None;
+        if let Some(worker) = &self.sgp4_worker {
+            while let Ok(result) = worker.receiver.try_recv() {
+                latest_result = Some(result);
+            }
+        }
+
+        if let Some(result) = latest_result {
+            self.satellite_states = result.states;
+            self.last_states_time = Some(result.time);
+            self.rebuild_satellite_instances();
+        } else if velocity_filter_changed {
+            self.rebuild_satellite_instances();
+        }
+    }
+
+    fn rebuild_satellite_instances(&mut self) {
+        let velocity_filter = &self.search_panel.velocity_filter;
+        let mut min_speed = velocity_filter.min_kms;
+        let mut max_speed = velocity_filter.max_kms;
+        if max_speed < min_speed {
+            std::mem::swap(&mut min_speed, &mut max_speed);
+        }
+
+        let (low_threshold, high_threshold) = if velocity_filter.enabled
+            && (velocity_filter.slow_percent > 0.0 || velocity_filter.fast_percent > 0.0)
+            && !self.satellite_states.is_empty()
+        {
+            let mut speeds: Vec<f32> = self
+                .satellite_states
+                .values()
+                .map(|state| state.velocity.length())
+                .collect();
+            speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let count = speeds.len() as f32;
+
+            let low = if velocity_filter.slow_percent > 0.0 {
+                let idx = ((velocity_filter.slow_percent / 100.0) * (count - 1.0))
+                    .round()
+                    .clamp(0.0, count - 1.0) as usize;
+                Some(speeds[idx])
+            } else {
+                None
+            };
+
+            let high = if velocity_filter.fast_percent > 0.0 {
+                let idx = ((1.0 - (velocity_filter.fast_percent / 100.0)) * (count - 1.0))
+                    .round()
+                    .clamp(0.0, count - 1.0) as usize;
+                Some(speeds[idx])
+            } else {
+                None
+            };
+
+            (low, high)
+        } else {
+            (None, None)
+        };
+
+        let current_time = *self.propagator.current_time();
+        let dt = if let Some(last_time) = self.last_states_time {
+            current_time.as_unixtime() - last_time.as_unixtime()
+        } else {
+            0.0
+        };
+        let dt = dt.clamp(-5.0, 5.0) as f32;
+        let extrapolate = dt / EARTH_RADIUS_KM as f32;
+
+        let camera_pos = self.camera.position();
+
+        let mut instances = Vec::with_capacity(self.satellite_states.len());
         self.satellite_positions.clear();
 
-        for (norad_id, state) in states {
-            self.satellite_positions.insert(norad_id, state.position);
+        for (norad_id, state) in self.satellite_states.iter() {
+            let speed = state.velocity.length();
+
+            if velocity_filter.enabled {
+                if speed < min_speed || speed > max_speed {
+                    continue;
+                }
+
+                if let Some(low) = low_threshold {
+                    if speed > low {
+                        if let Some(high) = high_threshold {
+                            if speed < high {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                } else if let Some(high) = high_threshold {
+                    if speed < high {
+                        continue;
+                    }
+                }
+            }
+
+            let position = state.position + state.velocity * extrapolate;
+
+            if is_occluded_by_earth(camera_pos, position) {
+                continue;
+            }
+
+            self.satellite_positions.insert(*norad_id, position);
 
             // Create instance for rendering
             let altitude_km = state.altitude_km;
@@ -156,32 +456,53 @@ impl SpaceDbApp {
             }
 
             // Highlight selected satellite
-            let is_selected = self.selected_object == Some(norad_id);
+            let is_selected = self.selected_object == Some(*norad_id);
             let size = if is_selected { 3.0 } else { 1.0 };
 
-            self.satellite_instances.push(SatelliteInstance {
-                position: state.position.to_array(),
+            instances.push(SatelliteInstance {
+                position: position.to_array(),
                 color,
                 size,
             });
         }
+
+        self.satellite_instances = Arc::new(instances);
     }
 
-    fn update_orbit_track(&mut self) {
-        self.orbit_track.clear();
+    fn update_orbit_track(&mut self, time_delta: f64) {
+        let current_target = self.selected_object;
+        let points = self.time_controls.orbit_points;
 
-        if let Some(norad_id) = self.selected_object {
+        self.orbit_track_update_accumulator += time_delta;
+
+        let target_changed = current_target != self.last_orbit_target;
+        let points_changed = points != self.last_orbit_points;
+        let time_refresh = self.orbit_track_update_accumulator.abs() >= 2.0;
+
+        if !(target_changed || points_changed || time_refresh) {
+            return;
+        }
+
+        self.last_orbit_target = current_target;
+        self.last_orbit_points = points;
+        self.orbit_track_update_accumulator = 0.0;
+
+        if let Some(norad_id) = current_target {
             // Get the TLE for this satellite directly from propagator
             if let Some(tle) = self.propagator.get_tle(norad_id) {
                 let color = [0.0, 1.0, 0.5, 0.8]; // Cyan-green
-                self.orbit_track = generate_orbit_track_from_tle(
+                let track = generate_orbit_track_from_tle(
                     tle,
                     self.propagator.current_time(),
-                    self.time_controls.orbit_points,
+                    points,
                     color,
                 );
+                self.orbit_track = Arc::new(track);
+                return;
             }
         }
+
+        self.orbit_track = Arc::new(Vec::new());
     }
 
     fn handle_camera_input(&mut self, ctx: &egui::Context, viewport_rect: egui::Rect) {
@@ -232,31 +553,21 @@ impl SpaceDbApp {
         Vec3::new(angle.cos() as f32, 0.3, angle.sin() as f32).normalize()
     }
 
-    fn update_wgpu_render_data(&mut self, frame: &eframe::Frame) {
+    fn update_wgpu_render_data(&mut self, frame: &eframe::Frame, aspect_ratio: f32) {
         if let Some(wgpu_render_state) = frame.wgpu_render_state() {
             let renderer = wgpu_render_state.renderer.read();
             if let Some(resources) = renderer.callback_resources.get::<SceneRenderResources>() {
                 let camera_pos = self.camera.position();
                 let show_satellites = self.time_controls.show_satellites;
-                let sorted_instances = if show_satellites {
-                    let mut instances = self.satellite_instances.clone();
-                    instances.sort_by(|a, b| {
-                        let a_pos = Vec3::from_array(a.position);
-                        let b_pos = Vec3::from_array(b.position);
-                        let a_dist = (a_pos - camera_pos).length_squared();
-                        let b_dist = (b_pos - camera_pos).length_squared();
-                        b_dist
-                            .partial_cmp(&a_dist)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    instances
+                let satellite_instances = if show_satellites {
+                    Arc::clone(&self.satellite_instances)
                 } else {
-                    Vec::new()
+                    Arc::new(Vec::new())
                 };
                 let orbit_track = if show_satellites {
-                    self.orbit_track.clone()
+                    Arc::clone(&self.orbit_track)
                 } else {
-                    Vec::new()
+                    Arc::new(Vec::new())
                 };
 
                 // Logging
@@ -283,12 +594,12 @@ impl SpaceDbApp {
 
                 let render_data = SceneRenderData {
                     camera: self.camera.clone(),
-                    aspect_ratio: 16.0 / 9.0, // Will be updated by viewport
+                    aspect_ratio,
                     sun_direction: self.propagator.get_sun_position(),
                     time: (self.propagator.current_time().as_jd() % 1.0) as f32,
                     earth_rotation: self.propagator.get_gmst() as f32,
-                    satellites: Arc::new(sorted_instances),
-                    orbit_track: Arc::new(orbit_track),
+                    satellites: satellite_instances,
+                    orbit_track,
                 };
                 resources.set_render_data(render_data);
             }
@@ -305,45 +616,8 @@ impl SpaceDbApp {
         self.handle_camera_input(ui.ctx(), viewport_rect);
 
         // Update aspect ratio in render data
-        if let Some(wgpu_render_state) = frame.wgpu_render_state() {
-            let renderer = wgpu_render_state.renderer.read();
-            if let Some(resources) = renderer.callback_resources.get::<SceneRenderResources>() {
-                let aspect_ratio = viewport_rect.width() / viewport_rect.height();
-                let camera_pos = self.camera.position();
-                let show_satellites = self.time_controls.show_satellites;
-                let sorted_instances = if show_satellites {
-                    let mut instances = self.satellite_instances.clone();
-                    instances.sort_by(|a, b| {
-                        let a_pos = Vec3::from_array(a.position);
-                        let b_pos = Vec3::from_array(b.position);
-                        let a_dist = (a_pos - camera_pos).length_squared();
-                        let b_dist = (b_pos - camera_pos).length_squared();
-                        b_dist
-                            .partial_cmp(&a_dist)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    instances
-                } else {
-                    Vec::new()
-                };
-                let orbit_track = if show_satellites {
-                    self.orbit_track.clone()
-                } else {
-                    Vec::new()
-                };
-
-                let render_data = SceneRenderData {
-                    camera: self.camera.clone(),
-                    aspect_ratio,
-                    sun_direction: self.propagator.get_sun_position(),
-                    time: (self.propagator.current_time().as_jd() % 1.0) as f32,
-                    earth_rotation: self.propagator.get_gmst() as f32,
-                    satellites: Arc::new(sorted_instances),
-                    orbit_track: Arc::new(orbit_track),
-                };
-                resources.set_render_data(render_data);
-            }
-        }
+        let aspect_ratio = viewport_rect.width() / viewport_rect.height();
+        self.update_wgpu_render_data(frame, aspect_ratio);
 
         // Allocate space and add the wgpu callback
         let (response, painter) =
@@ -367,9 +641,7 @@ impl SpaceDbApp {
         rect: egui::Rect,
         _viewport_rect: egui::Rect,
     ) {
-        let frame_time = (std::time::Instant::now() - self.last_frame_time)
-            .as_secs_f64()
-            .max(0.001);
+        let frame_time = self.last_frame_delta.max(0.001);
 
         // Info overlay
         painter.text(
@@ -470,7 +742,7 @@ impl SpaceDbApp {
 
         if self.orbit_track.len() > 1 {
             let mut screen_points: Vec<egui::Pos2> = Vec::new();
-            for vertex in &self.orbit_track {
+            for vertex in self.orbit_track.iter() {
                 let pos = Vec3::from_array(vertex.position);
                 let clip = vp_matrix * glam::Vec4::new(pos.x, pos.y, pos.z, 1.0);
                 if clip.w > 0.0 {
@@ -493,7 +765,7 @@ impl SpaceDbApp {
         }
 
         // Draw satellites
-        for instance in &self.satellite_instances {
+        for instance in self.satellite_instances.iter() {
             let pos = Vec3::from_array(instance.position);
             let clip = vp_matrix * glam::Vec4::new(pos.x, pos.y, pos.z, 1.0);
             if clip.w > 0.0 {
@@ -541,9 +813,7 @@ impl SpaceDbApp {
             }
         }
 
-        let frame_time = (std::time::Instant::now() - self.last_frame_time)
-            .as_secs_f64()
-            .max(0.001);
+        let frame_time = self.last_frame_delta.max(0.001);
 
         // Info overlay
         painter.text(
@@ -598,27 +868,40 @@ impl SpaceDbApp {
 impl eframe::App for SpaceDbApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Calculate frame time
-        let now = std::time::Instant::now();
-        let frame_time = (now - self.last_frame_time).as_secs_f64();
+        let max_fps = self.time_controls.max_fps.clamp(20.0, 500.0) as f64;
+        let min_frame_time = 1.0 / max_fps;
+        let mut now = std::time::Instant::now();
+        let mut frame_time = (now - self.last_frame_time).as_secs_f64();
+
+        if frame_time < min_frame_time {
+            let sleep_time = min_frame_time - frame_time;
+            std::thread::sleep(std::time::Duration::from_secs_f64(sleep_time));
+            now = std::time::Instant::now();
+            frame_time = (now - self.last_frame_time).as_secs_f64();
+        }
+
         self.last_frame_time = now;
+        self.last_frame_delta = frame_time;
 
         // Advance simulation time
         let time_delta = self.time_controls.time_delta(frame_time);
         self.propagator.advance_time(time_delta);
 
-        // Update satellite positions via SGP4
+        // Update satellite positions via SGP4 worker
         if self.time_controls.compute_satellites {
-            self.update_satellite_positions();
+            self.process_sgp4_worker(frame_time);
             // Update orbit track if selected
-            self.update_orbit_track();
+            self.update_orbit_track(time_delta);
         } else {
             self.satellite_positions.clear();
-            self.satellite_instances.clear();
-            self.orbit_track.clear();
+            self.satellite_instances = Arc::new(Vec::new());
+            self.satellite_states.clear();
+            self.last_states_time = None;
+            self.satellite_update_accumulator = 0.0;
+            self.orbit_track = Arc::new(Vec::new());
+            self.orbit_track_update_accumulator = 0.0;
+            self.last_orbit_target = None;
         }
-
-        // Update wgpu render data
-        self.update_wgpu_render_data(frame);
 
         // Top panel with time controls
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -650,13 +933,13 @@ impl eframe::App for SpaceDbApp {
             .default_width(300.0)
             .show(ctx, |ui| {
                 self.search_panel.show(ui, &self.search_index);
+                self.refresh_filtered_ids();
                 ui.separator();
 
                 if let Some(new_sel) = self.browser_panel.show(
                     ui,
                     &self.database,
-                    &self.search_panel.results,
-                    &self.search_panel.filter,
+                    &self.filtered_norad_ids,
                     self.selected_object,
                 ) {
                     self.selected_object = Some(new_sel);
@@ -743,9 +1026,44 @@ impl eframe::App for SpaceDbApp {
             }
         });
 
-        // Request continuous repaint for animation
-        ctx.request_repaint();
+        // Request continuous repaint for animation (with FPS cap)
+        let max_fps = self.time_controls.max_fps.clamp(20.0, 500.0) as f64;
+        let frame_delay = 1.0 / max_fps;
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(frame_delay));
     }
+}
+
+impl Drop for SpaceDbApp {
+    fn drop(&mut self) {
+        if let Some(worker) = &self.sgp4_worker {
+            let _ = worker.sender.send(Sgp4Command::Stop);
+        }
+    }
+}
+
+fn is_occluded_by_earth(camera_pos: Vec3, sat_pos: Vec3) -> bool {
+    if camera_pos.length_squared() <= 1.0 {
+        return false;
+    }
+    let dir = sat_pos - camera_pos;
+    let a = dir.dot(dir);
+    if a <= 0.0 {
+        return false;
+    }
+
+    let b = 2.0 * camera_pos.dot(dir);
+    let c = camera_pos.dot(camera_pos) - 1.0; // Earth radius = 1 in render units
+    let disc = b * b - 4.0 * a * c;
+    if disc <= 0.0 {
+        return false;
+    }
+
+    let sqrt_disc = disc.sqrt();
+    let t1 = (-b - sqrt_disc) / (2.0 * a);
+    let t2 = (-b + sqrt_disc) / (2.0 * a);
+    let (tmin, tmax) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+
+    (tmin >= 0.0 && tmin <= 1.0) || (tmax >= 0.0 && tmax <= 1.0)
 }
 
 fn main() -> Result<()> {
@@ -758,6 +1076,12 @@ fn main() -> Result<()> {
             .with_inner_size([1600.0, 900.0])
             .with_title("SpaceDB - Space Object Database Visualizer"),
         renderer: eframe::Renderer::Wgpu, // Force wgpu renderer
+        vsync: false,
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            present_mode: wgpu::PresentMode::Immediate,
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

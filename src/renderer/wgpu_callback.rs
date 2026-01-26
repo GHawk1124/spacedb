@@ -479,7 +479,18 @@ impl SceneRenderResources {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -490,7 +501,7 @@ impl SceneRenderResources {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
+                depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
