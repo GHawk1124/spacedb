@@ -19,6 +19,7 @@ pub struct SceneRenderData {
     pub aspect_ratio: f32,
     pub sun_direction: Vec3,
     pub time: f32,
+    pub earth_rotation: f32,
     pub satellites: Arc<Vec<SatelliteInstance>>,
     pub orbit_track: Arc<Vec<OrbitVertex>>,
 }
@@ -30,6 +31,7 @@ impl Default for SceneRenderData {
             aspect_ratio: 16.0 / 9.0,
             sun_direction: Vec3::new(1.0, 0.3, 0.5).normalize(),
             time: 0.0,
+            earth_rotation: 0.0,
             satellites: Arc::new(Vec::new()),
             orbit_track: Arc::new(Vec::new()),
         }
@@ -147,7 +149,7 @@ impl SceneRenderResources {
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Texture Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_u: wgpu::AddressMode::Repeat, // Wrap horizontally for skybox
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -738,17 +740,19 @@ impl SceneRenderResources {
             let (width, height) = rgb.dimensions();
             let data = rgb.into_raw();
 
-            // Tone-map HDR to LDR (Reinhard + gamma) for display
-            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            // Convert to Rgba16Float (half precision)
+            // This is filterable by default, unlike Rgba32Float
+            let mut rgba = Vec::with_capacity((width * height * 8) as usize); // 4 channels * 2 bytes
             for chunk in data.chunks_exact(3) {
-                let mapped_r = chunk[0] / (1.0 + chunk[0]);
-                let mapped_g = chunk[1] / (1.0 + chunk[1]);
-                let mapped_b = chunk[2] / (1.0 + chunk[2]);
-                let gamma = |c: f32| c.clamp(0.0, 1.0).powf(1.0 / 2.2);
-                rgba.push((gamma(mapped_r) * 255.0) as u8);
-                rgba.push((gamma(mapped_g) * 255.0) as u8);
-                rgba.push((gamma(mapped_b) * 255.0) as u8);
-                rgba.push(255);
+                let r = half::f16::from_f32(chunk[0]);
+                let g = half::f16::from_f32(chunk[1]);
+                let b = half::f16::from_f32(chunk[2]);
+                let a = half::f16::from_f32(1.0);
+
+                rgba.extend_from_slice(bytemuck::bytes_of(&r));
+                rgba.extend_from_slice(bytemuck::bytes_of(&g));
+                rgba.extend_from_slice(bytemuck::bytes_of(&b));
+                rgba.extend_from_slice(bytemuck::bytes_of(&a));
             }
 
             let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -761,7 +765,7 @@ impl SceneRenderResources {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: wgpu::TextureFormat::Rgba16Float,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
@@ -776,7 +780,7 @@ impl SceneRenderResources {
                 &rgba,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * width),
+                    bytes_per_row: Some(8 * width), // 8 bytes per pixel (4 * 2)
                     rows_per_image: Some(height),
                 },
                 wgpu::Extent3d {
@@ -793,53 +797,30 @@ impl SceneRenderResources {
         let earth_night = load_texture("2k_earth_nightmap.jpg")?;
         let earth_clouds = load_texture("2k_earth_clouds.jpg")?;
 
-        // Load HDRI skybox (4K)
+        // Load HDRI skybox (try multiple formats and resolutions)
         let skybox = load_hdri_texture("Starfield_Free/StudioHDR_2_StarField_01_4K.hdr")
-            .or_else(|_| load_hdri_texture("Starfield_Free/StudioHDR_2_StarField_01_4K.exr"))
-            .unwrap_or_else(|_| {
-                // Create a simple dark texture as fallback
-                let size = 64u32;
-                let data: Vec<u8> = (0..size * size * 4)
-                    .map(|i| if i % 4 == 3 { 255 } else { 5 })
-                    .collect();
-
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Skybox Fallback"),
-                    size: wgpu::Extent3d {
-                        width: size,
-                        height: size,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * size),
-                        rows_per_image: Some(size),
-                    },
-                    wgpu::Extent3d {
-                        width: size,
-                        height: size,
-                        depth_or_array_layers: 1,
-                    },
+            .or_else(|e| {
+                log::warn!("Failed to load 4K HDR, trying 4K EXR: {}", e);
+                load_hdri_texture("Starfield_Free/StudioHDR_2_StarField_01_4K.exr")
+            })
+            .or_else(|e| {
+                log::warn!("Failed to load 4K EXR, trying 2K HDR: {}", e);
+                load_hdri_texture("Starfield_Free/StudioHDR_2_StarField_01_2K.hdr")
+            })
+            .or_else(|e| {
+                log::warn!("Failed to load 2K HDR, trying 2K EXR: {}", e);
+                load_hdri_texture("Starfield_Free/StudioHDR_2_StarField_01_2K.exr")
+            })
+            .or_else(|e| {
+                log::warn!("Failed to load any HDRI, using fallback texture: {}", e);
+                Ok(load_fallback_skybox(device, queue))
+            })
+            .unwrap_or_else(|e: anyhow::Error| {
+                log::error!(
+                    "Severe error loading skybox, using emergency fallback: {}",
+                    e
                 );
-
-                texture
+                load_fallback_skybox(device, queue)
             });
 
         Ok((earth_day, earth_night, earth_clouds, skybox))
@@ -895,12 +876,14 @@ impl SceneRenderResources {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
 
         // Update earth uniforms
+        let sun_dir_normalized = data.sun_direction.normalize();
         let earth_uniforms = EarthUniforms {
-            model: Mat4::IDENTITY.to_cols_array_2d(),
+            // GMST rotation - positive rotation for CCW (standard mathematical convention)
+            model: Mat4::from_rotation_y(data.earth_rotation).to_cols_array_2d(),
             sun_direction: [
-                data.sun_direction.x,
-                data.sun_direction.y,
-                data.sun_direction.z,
+                sun_dir_normalized.x,
+                sun_dir_normalized.y,
+                sun_dir_normalized.z,
                 0.0,
             ],
             time: data.time,
@@ -1092,31 +1075,102 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     // Day/night blending based on sun angle
     let sun_dot = dot(normal, sun_dir);
-    let day_factor = smoothstep(-0.1, 0.3, sun_dot);
+    // Wider transition zone for smoother twilight (-0.3 to 0.1)
+    let day_factor = smoothstep(-0.3, 0.1, sun_dot);
     
-    // Sample textures
-    let day_color = textureSample(day_texture, tex_sampler, in.uv).rgb;
-    let night_color = textureSample(night_texture, tex_sampler, in.uv).rgb * 2.0;
-    let clouds = textureSample(clouds_texture, tex_sampler, in.uv).r;
+    // Use standard UVs (no flip) - rotation handles coordinate alignment
+    let uv_corrected = vec2<f32>(in.uv.x, in.uv.y);
     
-    // Mix day and night
-    var color = mix(night_color, day_color, day_factor);
+    // Sample textures (using corrected UVs)
+    let day_color = textureSample(day_texture, tex_sampler, uv_corrected).rgb;
+    let night_color = textureSample(night_texture, tex_sampler, uv_corrected).rgb;
+    let clouds = textureSample(clouds_texture, tex_sampler, uv_corrected).r;
     
-    // Add clouds (brighter on day side)
-    let cloud_brightness = mix(0.3, 1.0, day_factor);
-    color = mix(color, vec3<f32>(cloud_brightness), clouds * 0.5 * day_factor);
+    // Diffuse lighting for day side (makes it brighter where sun hits directly)
+    let diffuse = max(sun_dot, 0.0);
+    // Ambient + diffuse lighting on day side
+    let lit_day_color = day_color * (0.3 + 0.7 * diffuse);
     
-    // Atmospheric rim lighting
+    // Night lights - boost visibility
+    let lit_night_color = night_color * 3.0;
+    
+    // Mix day and night based on terminator position
+    var color = mix(lit_night_color, lit_day_color, day_factor);
+    
+    // Add clouds (visible on day side, faintly on night side from earthshine)
+    let cloud_day_brightness = 0.3 + 0.7 * diffuse;
+    let cloud_night_brightness = 0.05;
+    let cloud_brightness = mix(cloud_night_brightness, cloud_day_brightness, day_factor);
+    color = mix(color, vec3<f32>(cloud_brightness), clouds * 0.6);
+    
+    // Atmospheric rim lighting (blue glow at edges)
     let view_dir = normalize(camera.camera_pos.xyz - in.world_pos);
     let rim = 1.0 - max(dot(view_dir, normal), 0.0);
-    let atmosphere = vec3<f32>(0.3, 0.5, 1.0) * pow(rim, 4.0) * 0.6;
+    let rim_intensity = pow(rim, 3.0);
+    // Stronger on day side, subtle on night side
+    let atmosphere = vec3<f32>(0.4, 0.6, 1.0) * rim_intensity * mix(0.15, 0.5, day_factor);
     color += atmosphere;
     
     return vec4<f32>(color, 1.0);
 }
 "#;
 
-const SKYBOX_SHADER: &str = r#"
+fn load_fallback_skybox(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
+    let size = 64u32;
+    // Create simple checkerboard pattern
+    let mut data = Vec::with_capacity((size * size * 8) as usize);
+    for i in 0..(size * size) {
+        let val = if i % 2 == 0 { 1.0f32 } else { 0.1f32 };
+        let r = half::f16::from_f32(val);
+        let g = half::f16::from_f32(val);
+        let b = half::f16::from_f32(val * 0.5); // Slight blue tint
+        let a = half::f16::from_f32(1.0);
+
+        data.extend_from_slice(bytemuck::bytes_of(&r));
+        data.extend_from_slice(bytemuck::bytes_of(&g));
+        data.extend_from_slice(bytemuck::bytes_of(&b));
+        data.extend_from_slice(bytemuck::bytes_of(&a));
+    }
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Skybox Fallback"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8 * size),
+            rows_per_image: Some(size),
+        },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    texture
+}
+
+const SKYBOX_SHADER: &str = r##"
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     view: mat4x4<f32>,
@@ -1165,14 +1219,28 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dir = normalize(in.direction);
+    // Standard equirectangular mapping
+    // u = 0.5 + atan2(z, x) / 2pi
+    // v = 0.5 - asin(y) / pi  (flipped for correct orientation)
     let u = atan2(dir.z, dir.x) / (2.0 * 3.14159265) + 0.5;
-    let v = asin(clamp(dir.y, -1.0, 1.0)) / 3.14159265 + 0.5;
+    let v = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / 3.14159265;
+    
     let color = textureSample(skybox_texture, skybox_sampler, vec2<f32>(u, v)).rgb;
-    return vec4<f32>(color, 1.0);
+    
+    // Exposure boost for HDR starfield (stars are often dim in HDRIs)
+    let exposed = color * 2.0;
+    
+    // Reinhard tone mapping for HDR
+    let mapped = exposed / (exposed + vec3<f32>(1.0));
+    
+    // Gamma correction
+    let gamma = pow(mapped, vec3<f32>(1.0/2.2));
+    
+    return vec4<f32>(gamma, 1.0);
 }
-"#;
+"##;
 
-const SATELLITE_SHADER: &str = r#"
+const SATELLITE_SHADER: &str = r##"
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     view: mat4x4<f32>,
@@ -1231,23 +1299,23 @@ fn vs_main(
     out.uv = offset * 0.5 + 0.5;
     
     return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Circular point with soft edge
-    let dist = length(in.uv - vec2<f32>(0.5));
-    let alpha = 1.0 - smoothstep(0.35, 0.5, dist);
-    
-    if (alpha < 0.01) {
-        discard;
     }
     
-    return vec4<f32>(in.color.rgb, in.color.a * alpha);
-}
-"#;
+    @fragment
+    fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+        // Circular point with soft edge
+        let dist = length(in.uv - vec2<f32>(0.5));
+        let alpha = 1.0 - smoothstep(0.35, 0.5, dist);
+        
+        if (alpha < 0.01) {
+            discard;
+        }
+        
+        return vec4<f32>(in.color.rgb, in.color.a * alpha);
+    }
+"##;
 
-const ORBIT_SHADER: &str = r#"
+const ORBIT_SHADER: &str = r##"
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     view: mat4x4<f32>,
@@ -1279,9 +1347,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return in.color;
 }
-"#;
+"##;
 
-const BLIT_SHADER: &str = r#"
+const BLIT_SHADER: &str = r##"
+// Blit Shader
 @group(0) @binding(0) var blit_texture: texture_2d<f32>;
 @group(0) @binding(1) var blit_sampler: sampler;
 
@@ -1311,4 +1380,4 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(blit_texture, blit_sampler, in.uv);
 }
-"#;
+"##;

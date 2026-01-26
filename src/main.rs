@@ -56,6 +56,7 @@ pub struct SpaceDbApp {
 
     // Frame timing
     last_frame_time: std::time::Instant,
+    last_log_time: std::time::Instant,
 }
 
 impl SpaceDbApp {
@@ -128,6 +129,7 @@ impl SpaceDbApp {
             orbit_track: Vec::new(),
             wgpu_initialized,
             last_frame_time: std::time::Instant::now(),
+            last_log_time: std::time::Instant::now(),
         })
     }
 
@@ -230,7 +232,7 @@ impl SpaceDbApp {
         Vec3::new(angle.cos() as f32, 0.3, angle.sin() as f32).normalize()
     }
 
-    fn update_wgpu_render_data(&self, frame: &eframe::Frame) {
+    fn update_wgpu_render_data(&mut self, frame: &eframe::Frame) {
         if let Some(wgpu_render_state) = frame.wgpu_render_state() {
             let renderer = wgpu_render_state.renderer.read();
             if let Some(resources) = renderer.callback_resources.get::<SceneRenderResources>() {
@@ -246,11 +248,34 @@ impl SpaceDbApp {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
+                // Logging
+                if self.last_log_time.elapsed().as_secs_f32() > 1.0 {
+                    self.last_log_time = std::time::Instant::now();
+                    log::info!("--- Render State Log ---");
+                    log::info!("Time: {}", self.propagator.format_time());
+                    let gmst = self.propagator.get_gmst();
+                    log::info!("GMST: {:.4} rad ({:.2} deg)", gmst, gmst.to_degrees());
+                    let sun = self.propagator.get_sun_position();
+                    log::info!(
+                        "Sun Pos (Render Frame): {:.4}, {:.4}, {:.4}",
+                        sun.x,
+                        sun.y,
+                        sun.z
+                    );
+                    log::info!(
+                        "Camera Pos: {:.2}, {:.2}, {:.2}",
+                        camera_pos.x,
+                        camera_pos.y,
+                        camera_pos.z
+                    );
+                }
+
                 let render_data = SceneRenderData {
                     camera: self.camera.clone(),
                     aspect_ratio: 16.0 / 9.0, // Will be updated by viewport
-                    sun_direction: self.get_sun_direction(),
+                    sun_direction: self.propagator.get_sun_position(),
                     time: (self.propagator.current_time().as_jd() % 1.0) as f32,
+                    earth_rotation: self.propagator.get_gmst() as f32,
                     satellites: Arc::new(sorted_instances),
                     orbit_track: Arc::new(self.orbit_track.clone()),
                 };
@@ -287,8 +312,9 @@ impl SpaceDbApp {
                 let render_data = SceneRenderData {
                     camera: self.camera.clone(),
                     aspect_ratio,
-                    sun_direction: self.get_sun_direction(),
+                    sun_direction: self.propagator.get_sun_position(),
                     time: (self.propagator.current_time().as_jd() % 1.0) as f32,
+                    earth_rotation: self.propagator.get_gmst() as f32,
                     satellites: Arc::new(sorted_instances),
                     orbit_track: Arc::new(self.orbit_track.clone()),
                 };

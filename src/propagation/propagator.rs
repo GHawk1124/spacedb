@@ -3,6 +3,7 @@
 use crate::data::{SpaceObject, TleData};
 use glam::Vec3;
 use satkit::sgp4::sgp4;
+use satkit::{frametransform, lpephem};
 use std::collections::HashMap;
 
 /// Propagation result for a single satellite
@@ -83,6 +84,22 @@ impl Propagator {
         )
     }
 
+    /// Get Greenwich Mean Sidereal Time in radians
+    pub fn get_gmst(&self) -> f64 {
+        frametransform::gmst(&self.current_time)
+    }
+
+    /// Get Sun position in Render Space (ECI, Y-up, km)
+    pub fn get_sun_position(&self) -> Vec3 {
+        let pos = lpephem::sun::pos_gcrf(&self.current_time);
+        // Convert from meters to km and swizzle to Y-up
+        Vec3::new(
+            pos[0] as f32 / 1000.0,
+            pos[2] as f32 / 1000.0,  // Z -> Y
+            -pos[1] as f32 / 1000.0, // Y -> -Z
+        )
+    }
+
     /// Propagate a single satellite
     pub fn propagate(&self, norad_id: u32) -> Option<SatelliteState> {
         let tle = self.tles.get(&norad_id)?;
@@ -107,7 +124,7 @@ impl Propagator {
                     vel[2] as f32 / 1000.0,  // TEME Z -> Render Y
                     -vel[1] as f32 / 1000.0, // TEME Y -> Render -Z
                 );
-                let vel_kms = Vec3::new(
+                let _vel_kms = Vec3::new(
                     vel[0] as f32 / 1000.0,
                     vel[2] as f32 / 1000.0, // TEME Z -> Render Y
                     vel[1] as f32 / 1000.0, // TEME Y -> Render Z

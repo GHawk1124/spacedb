@@ -29,7 +29,7 @@ serde_json = "1.0"
 flate2 = "1.0"
 
 # Image/texture loading
-image = { version = "0.25", features = ["jpeg", "png", "tiff", "hdr"] }
+image = { version = "0.25", features = ["jpeg", "png", "tiff", "hdr", "exr"] }
 
 # 3D math
 nalgebra = "0.33"
@@ -37,6 +37,7 @@ glam = { version = "0.29", features = ["bytemuck"] }
 
 # GPU buffer utilities
 bytemuck = { version = "1.0", features = ["derive"] }
+half = { version = "2.3", features = ["bytemuck"] }
 
 # Logging
 log = "0.4"
@@ -54,3 +55,4 @@ lto = "thin"
 
 [profile.dev]
 opt-level = 1
+incremental = false

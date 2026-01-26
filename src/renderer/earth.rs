@@ -71,20 +71,21 @@ pub fn generate_earth_sphere(segments: u32, rings: u32) -> (Vec<EarthVertex>, Ve
     }
 
     // Generate indices
+    // Winding order must be CCW when viewed from OUTSIDE the sphere
     for ring in 0..rings {
         for seg in 0..segments {
             let current = ring * (segments + 1) + seg;
             let next = current + segments + 1;
 
-            // First triangle
+            // First triangle (CCW when viewed from outside)
             indices.push(current);
-            indices.push(next);
             indices.push(current + 1);
+            indices.push(next);
 
-            // Second triangle
+            // Second triangle (CCW when viewed from outside)
             indices.push(current + 1);
-            indices.push(next);
             indices.push(next + 1);
+            indices.push(next);
         }
     }
 
