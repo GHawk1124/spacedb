@@ -144,16 +144,27 @@ impl SceneRenderResources {
         });
 
         // Load textures
-        let (earth_day, earth_night, earth_clouds, skybox) =
-            Self::load_textures(device, queue, assets_path)?;
+        let max_texture_dim = device.limits().max_texture_dimension_2d;
+        let (earth_day, earth_night, earth_clouds, earth_specular, earth_normal, skybox) =
+            Self::load_textures(device, queue, assets_path, max_texture_dim)?;
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Texture Sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat, // Wrap horizontally for skybox
+            address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let skybox_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Skybox Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -228,6 +239,26 @@ impl SceneRenderResources {
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
                         visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
@@ -237,6 +268,9 @@ impl SceneRenderResources {
         let earth_day_view = earth_day.create_view(&wgpu::TextureViewDescriptor::default());
         let earth_night_view = earth_night.create_view(&wgpu::TextureViewDescriptor::default());
         let earth_clouds_view = earth_clouds.create_view(&wgpu::TextureViewDescriptor::default());
+        let earth_specular_view =
+            earth_specular.create_view(&wgpu::TextureViewDescriptor::default());
+        let earth_normal_view = earth_normal.create_view(&wgpu::TextureViewDescriptor::default());
         let skybox_view = skybox.create_view(&wgpu::TextureViewDescriptor::default());
 
         let earth_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -261,6 +295,14 @@ impl SceneRenderResources {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&earth_specular_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&earth_normal_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
@@ -350,7 +392,7 @@ impl SceneRenderResources {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                    resource: wgpu::BindingResource::Sampler(&skybox_sampler),
                 },
             ],
         });
@@ -682,8 +724,16 @@ impl SceneRenderResources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         assets_path: &Path,
-    ) -> Result<(wgpu::Texture, wgpu::Texture, wgpu::Texture, wgpu::Texture)> {
-        let load_texture = |name: &str| -> Result<wgpu::Texture> {
+        max_texture_dim: u32,
+    ) -> Result<(
+        wgpu::Texture,
+        wgpu::Texture,
+        wgpu::Texture,
+        wgpu::Texture,
+        wgpu::Texture,
+        wgpu::Texture,
+    )> {
+        let load_texture = |name: &str, format: wgpu::TextureFormat| -> Result<wgpu::Texture> {
             let path = assets_path.join(name);
             log::info!("Loading texture: {:?}", path);
 
@@ -702,7 +752,7 @@ impl SceneRenderResources {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
@@ -730,11 +780,56 @@ impl SceneRenderResources {
             Ok(texture)
         };
 
+        let load_texture_candidates =
+            |candidates: &[&str], format: wgpu::TextureFormat| -> Result<wgpu::Texture> {
+                for name in candidates {
+                    let path = assets_path.join(name);
+                    if !path.exists() {
+                        continue;
+                    }
+                    match load_texture(name, format) {
+                        Ok(texture) => {
+                            log::info!("Using texture: {}", name);
+                            return Ok(texture);
+                        }
+                        Err(err) => {
+                            log::warn!("Failed to load texture {}: {}", name, err);
+                        }
+                    }
+                }
+
+                Err(anyhow::anyhow!(
+                    "Failed to load any texture from candidates: {:?}",
+                    candidates
+                ))
+            };
+
         let load_hdri_texture = |name: &str| -> Result<wgpu::Texture> {
             let path = assets_path.join(name);
             log::info!("Loading HDRI texture: {:?}", path);
 
-            let img = image::open(&path)
+            let mut reader = image::ImageReader::open(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to open HDRI {:?}: {}", path, e))?;
+            reader.no_limits();
+            let (width, height) = reader
+                .into_dimensions()
+                .map_err(|e| anyhow::anyhow!("Failed to read HDRI dimensions {:?}: {}", path, e))?;
+
+            if width > max_texture_dim || height > max_texture_dim {
+                return Err(anyhow::anyhow!(
+                    "HDRI {} is {}x{}, exceeds device max {}",
+                    name,
+                    width,
+                    height,
+                    max_texture_dim
+                ));
+            }
+
+            let mut reader = image::ImageReader::open(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to open HDRI {:?}: {}", path, e))?;
+            reader.no_limits();
+            let img = reader
+                .decode()
                 .map_err(|e| anyhow::anyhow!("Failed to load HDRI {:?}: {}", path, e))?;
             let rgb = img.to_rgb32f();
             let (width, height) = rgb.dimensions();
@@ -793,37 +888,87 @@ impl SceneRenderResources {
             Ok(texture)
         };
 
-        let earth_day = load_texture("2k_earth_daymap.jpg")?;
-        let earth_night = load_texture("2k_earth_nightmap.jpg")?;
-        let earth_clouds = load_texture("2k_earth_clouds.jpg")?;
+        let earth_day = load_texture_candidates(
+            &[
+                "8k_earth_daymap.jpg",
+                "4k_earth_daymap.jpg",
+                "2k_earth_daymap.jpg",
+            ],
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        )?;
+        let earth_night = load_texture_candidates(
+            &[
+                "8k_earth_nightmap.jpg",
+                "4k_earth_nightmap.jpg",
+                "2k_earth_nightmap.jpg",
+            ],
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        )?;
+        let earth_clouds = load_texture_candidates(
+            &[
+                "8k_earth_clouds.jpg",
+                "4k_earth_clouds.jpg",
+                "2k_earth_clouds.jpg",
+            ],
+            wgpu::TextureFormat::Rgba8Unorm,
+        )?;
+        let earth_specular = load_texture_candidates(
+            &[
+                "8k_earth_specular_map.tif",
+                "4k_earth_specular_map.tif",
+                "2k_earth_specular_map.tif",
+            ],
+            wgpu::TextureFormat::Rgba8Unorm,
+        )?;
+        let earth_normal = load_texture_candidates(
+            &[
+                "8k_earth_normal_map.tif",
+                "4k_earth_normal_map.tif",
+                "2k_earth_normal_map.tif",
+            ],
+            wgpu::TextureFormat::Rgba8Unorm,
+        )?;
 
         // Load HDRI skybox (try multiple formats and resolutions)
-        let skybox = load_hdri_texture("Starfield_Free/StudioHDR_2_StarField_01_4K.hdr")
-            .or_else(|e| {
-                log::warn!("Failed to load 4K HDR, trying 4K EXR: {}", e);
-                load_hdri_texture("Starfield_Free/StudioHDR_2_StarField_01_4K.exr")
-            })
-            .or_else(|e| {
-                log::warn!("Failed to load 4K EXR, trying 2K HDR: {}", e);
-                load_hdri_texture("Starfield_Free/StudioHDR_2_StarField_01_2K.hdr")
-            })
-            .or_else(|e| {
-                log::warn!("Failed to load 2K HDR, trying 2K EXR: {}", e);
-                load_hdri_texture("Starfield_Free/StudioHDR_2_StarField_01_2K.exr")
-            })
-            .or_else(|e| {
-                log::warn!("Failed to load any HDRI, using fallback texture: {}", e);
-                Ok(load_fallback_skybox(device, queue))
-            })
-            .unwrap_or_else(|e: anyhow::Error| {
-                log::error!(
-                    "Severe error loading skybox, using emergency fallback: {}",
-                    e
-                );
-                load_fallback_skybox(device, queue)
-            });
+        let hdri_candidates = [
+            "Starfield_Free/StudioHDR_2_StarField_01_16K.hdr",
+            "Starfield_Free/StudioHDR_2_StarField_01_16K.exr",
+            "Starfield_Free/StudioHDR_2_StarField_01_8K.hdr",
+            "Starfield_Free/StudioHDR_2_StarField_01_8K.exr",
+            "Starfield_Free/StudioHDR_2_StarField_01_4K.hdr",
+            "Starfield_Free/StudioHDR_2_StarField_01_4K.exr",
+            "Starfield_Free/StudioHDR_2_StarField_01_2K.hdr",
+            "Starfield_Free/StudioHDR_2_StarField_01_2K.exr",
+        ];
 
-        Ok((earth_day, earth_night, earth_clouds, skybox))
+        let mut skybox = None;
+        for name in hdri_candidates {
+            match load_hdri_texture(name) {
+                Ok(texture) => {
+                    skybox = Some(texture);
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("Failed to load HDRI {}: {}", name, e);
+                }
+            }
+        }
+
+        let skybox = skybox
+            .or_else(|| {
+                log::warn!("Failed to load any HDRI, using fallback texture");
+                Some(load_fallback_skybox(device, queue))
+            })
+            .unwrap_or_else(|| load_fallback_skybox(device, queue));
+
+        Ok((
+            earth_day,
+            earth_night,
+            earth_clouds,
+            earth_specular,
+            earth_normal,
+            skybox,
+        ))
     }
 
     /// Update render data (called from app each frame)
@@ -1042,7 +1187,9 @@ struct EarthUniforms {
 @group(1) @binding(1) var day_texture: texture_2d<f32>;
 @group(1) @binding(2) var night_texture: texture_2d<f32>;
 @group(1) @binding(3) var clouds_texture: texture_2d<f32>;
-@group(1) @binding(4) var tex_sampler: sampler;
+@group(1) @binding(4) var specular_texture: texture_2d<f32>;
+@group(1) @binding(5) var normal_texture: texture_2d<f32>;
+@group(1) @binding(6) var tex_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -1071,46 +1218,79 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_dir = normalize(earth.sun_direction.xyz);
-    let normal = normalize(in.normal);
-    
-    // Day/night blending based on sun angle
-    let sun_dot = dot(normal, sun_dir);
-    // Wider transition zone for smoother twilight (-0.3 to 0.1)
-    let day_factor = smoothstep(-0.3, 0.1, sun_dot);
-    
+
     // Use standard UVs (no flip) - rotation handles coordinate alignment
     let uv_corrected = vec2<f32>(in.uv.x, in.uv.y);
-    
+
     // Sample textures (using corrected UVs)
     let day_color = textureSample(day_texture, tex_sampler, uv_corrected).rgb;
     let night_color = textureSample(night_texture, tex_sampler, uv_corrected).rgb;
     let clouds = textureSample(clouds_texture, tex_sampler, uv_corrected).r;
-    
+    let specular_map = textureSample(specular_texture, tex_sampler, uv_corrected).r;
+    let normal_sample =
+        textureSample(normal_texture, tex_sampler, uv_corrected).xyz * 2.0 - vec3<f32>(1.0);
+
+    let geom_normal = normalize(in.normal);
+
+    // Build a tangent basis for the sphere (approximate, stable enough for a globe)
+    var normal = geom_normal;
+    var tangent = normalize(vec3<f32>(-normal.z, 0.0, normal.x));
+    if (length(tangent) < 0.001) {
+        tangent = normalize(cross(vec3<f32>(1.0, 0.0, 0.0), normal));
+    }
+    let bitangent = normalize(cross(normal, tangent));
+    normal = normalize(tangent * normal_sample.x + bitangent * normal_sample.y + normal * normal_sample.z);
+
+    // Day/night blending based on sun angle
+    let sun_dot_geom = dot(geom_normal, sun_dir);
+    // Sharper terminator with a slight twilight band
+    let day_factor = smoothstep(-0.08, 0.02, sun_dot_geom);
+    let night_factor = 1.0 - smoothstep(-0.2, -0.05, sun_dot_geom);
+
     // Diffuse lighting for day side (makes it brighter where sun hits directly)
+    let sun_dot = dot(normal, sun_dir);
     let diffuse = max(sun_dot, 0.0);
     // Ambient + diffuse lighting on day side
-    let lit_day_color = day_color * (0.3 + 0.7 * diffuse);
-    
+    let lit_day_color = day_color * (0.25 + 0.9 * diffuse);
+
     // Night lights - boost visibility
-    let lit_night_color = night_color * 3.0;
-    
+    let lit_night_color = night_color * (1.5 + 2.5 * night_factor);
+
     // Mix day and night based on terminator position
     var color = mix(lit_night_color, lit_day_color, day_factor);
-    
+
     // Add clouds (visible on day side, faintly on night side from earthshine)
-    let cloud_day_brightness = 0.3 + 0.7 * diffuse;
-    let cloud_night_brightness = 0.05;
-    let cloud_brightness = mix(cloud_night_brightness, cloud_day_brightness, day_factor);
-    color = mix(color, vec3<f32>(cloud_brightness), clouds * 0.6);
-    
-    // Atmospheric rim lighting (blue glow at edges)
+    let cloud_light = mix(0.08, 1.0, day_factor) * (0.35 + 0.65 * diffuse);
+    let cloud_day = clouds * cloud_light;
+    let cloud_night = clouds * night_factor * 0.12;
+    color = mix(color, vec3<f32>(1.0), cloud_day * 0.6);
+    color = mix(color, color * 0.9, cloud_night);
+
     let view_dir = normalize(camera.camera_pos.xyz - in.world_pos);
-    let rim = 1.0 - max(dot(view_dir, normal), 0.0);
-    let rim_intensity = pow(rim, 3.0);
+
+    // Specular highlight (water glint)
+    let half_dir = normalize(sun_dir + view_dir);
+    let specular = pow(max(dot(normal, half_dir), 0.0), 64.0) * specular_map * diffuse;
+    color += vec3<f32>(1.0) * specular * 0.6;
+
+    // Atmospheric rim lighting (blue glow at edges)
+    let rim = 1.0 - max(dot(view_dir, geom_normal), 0.0);
+    let rim_intensity = pow(rim, 2.0);
+    let sun_view = max(dot(view_dir, sun_dir), 0.0);
+    let forward_scatter = pow(sun_view, 8.0);
     // Stronger on day side, subtle on night side
-    let atmosphere = vec3<f32>(0.4, 0.6, 1.0) * rim_intensity * mix(0.15, 0.5, day_factor);
-    color += atmosphere;
-    
+    let atmosphere_color = mix(vec3<f32>(0.05, 0.12, 0.25), vec3<f32>(0.25, 0.6, 1.1), day_factor);
+    let atmosphere = atmosphere_color * rim_intensity * mix(0.25, 1.0, day_factor);
+    let sun_glow = vec3<f32>(0.6, 0.7, 1.0) * forward_scatter * 0.2;
+    let night_airglow = vec3<f32>(0.04, 0.1, 0.25) * rim_intensity * night_factor * 0.7;
+    // Warm terminator glow
+    let terminator = pow(1.0 - abs(sun_dot_geom), 3.0) * day_factor;
+    let terminator_glow = vec3<f32>(0.9, 0.4, 0.2) * terminator * 0.08;
+    color += atmosphere + sun_glow + night_airglow + terminator_glow;
+
+    // Slight exposure boost for overall brightness
+    color *= 1.1;
+
     return vec4<f32>(color, 1.0);
 }
 "#;
@@ -1281,8 +1461,8 @@ fn vs_main(
     
     // Calculate billboard size based on distance
     let dist = length(camera.camera_pos.xyz - instance.position);
-    let base_size = instance.size * 0.008;
-    let screen_size = clamp(base_size / dist, 0.0008, 0.02);
+    let base_size = instance.size * 0.004;
+    let screen_size = clamp(base_size / dist, 0.0004, 0.01);
     
     // Get camera right and up vectors from view matrix
     let right = vec3<f32>(camera.view[0][0], camera.view[1][0], camera.view[2][0]);

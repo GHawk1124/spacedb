@@ -237,16 +237,27 @@ impl SpaceDbApp {
             let renderer = wgpu_render_state.renderer.read();
             if let Some(resources) = renderer.callback_resources.get::<SceneRenderResources>() {
                 let camera_pos = self.camera.position();
-                let mut sorted_instances = self.satellite_instances.clone();
-                sorted_instances.sort_by(|a, b| {
-                    let a_pos = Vec3::from_array(a.position);
-                    let b_pos = Vec3::from_array(b.position);
-                    let a_dist = (a_pos - camera_pos).length_squared();
-                    let b_dist = (b_pos - camera_pos).length_squared();
-                    b_dist
-                        .partial_cmp(&a_dist)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                let show_satellites = self.time_controls.show_satellites;
+                let sorted_instances = if show_satellites {
+                    let mut instances = self.satellite_instances.clone();
+                    instances.sort_by(|a, b| {
+                        let a_pos = Vec3::from_array(a.position);
+                        let b_pos = Vec3::from_array(b.position);
+                        let a_dist = (a_pos - camera_pos).length_squared();
+                        let b_dist = (b_pos - camera_pos).length_squared();
+                        b_dist
+                            .partial_cmp(&a_dist)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    instances
+                } else {
+                    Vec::new()
+                };
+                let orbit_track = if show_satellites {
+                    self.orbit_track.clone()
+                } else {
+                    Vec::new()
+                };
 
                 // Logging
                 if self.last_log_time.elapsed().as_secs_f32() > 1.0 {
@@ -277,7 +288,7 @@ impl SpaceDbApp {
                     time: (self.propagator.current_time().as_jd() % 1.0) as f32,
                     earth_rotation: self.propagator.get_gmst() as f32,
                     satellites: Arc::new(sorted_instances),
-                    orbit_track: Arc::new(self.orbit_track.clone()),
+                    orbit_track: Arc::new(orbit_track),
                 };
                 resources.set_render_data(render_data);
             }
@@ -286,8 +297,9 @@ impl SpaceDbApp {
 
     fn render_3d_viewport(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let viewport_rect = ui.available_rect_before_wrap();
-        let viewport_width = viewport_rect.width() as u32;
-        let viewport_height = viewport_rect.height() as u32;
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        let viewport_width = (viewport_rect.width() * pixels_per_point).round().max(1.0) as u32;
+        let viewport_height = (viewport_rect.height() * pixels_per_point).round().max(1.0) as u32;
 
         // Handle camera input
         self.handle_camera_input(ui.ctx(), viewport_rect);
@@ -298,16 +310,27 @@ impl SpaceDbApp {
             if let Some(resources) = renderer.callback_resources.get::<SceneRenderResources>() {
                 let aspect_ratio = viewport_rect.width() / viewport_rect.height();
                 let camera_pos = self.camera.position();
-                let mut sorted_instances = self.satellite_instances.clone();
-                sorted_instances.sort_by(|a, b| {
-                    let a_pos = Vec3::from_array(a.position);
-                    let b_pos = Vec3::from_array(b.position);
-                    let a_dist = (a_pos - camera_pos).length_squared();
-                    let b_dist = (b_pos - camera_pos).length_squared();
-                    b_dist
-                        .partial_cmp(&a_dist)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                let show_satellites = self.time_controls.show_satellites;
+                let sorted_instances = if show_satellites {
+                    let mut instances = self.satellite_instances.clone();
+                    instances.sort_by(|a, b| {
+                        let a_pos = Vec3::from_array(a.position);
+                        let b_pos = Vec3::from_array(b.position);
+                        let a_dist = (a_pos - camera_pos).length_squared();
+                        let b_dist = (b_pos - camera_pos).length_squared();
+                        b_dist
+                            .partial_cmp(&a_dist)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    instances
+                } else {
+                    Vec::new()
+                };
+                let orbit_track = if show_satellites {
+                    self.orbit_track.clone()
+                } else {
+                    Vec::new()
+                };
 
                 let render_data = SceneRenderData {
                     camera: self.camera.clone(),
@@ -316,7 +339,7 @@ impl SpaceDbApp {
                     time: (self.propagator.current_time().as_jd() % 1.0) as f32,
                     earth_rotation: self.propagator.get_gmst() as f32,
                     satellites: Arc::new(sorted_instances),
-                    orbit_track: Arc::new(self.orbit_track.clone()),
+                    orbit_track: Arc::new(orbit_track),
                 };
                 resources.set_render_data(render_data);
             }
@@ -584,10 +607,15 @@ impl eframe::App for SpaceDbApp {
         self.propagator.advance_time(time_delta);
 
         // Update satellite positions via SGP4
-        self.update_satellite_positions();
-
-        // Update orbit track if selected
-        self.update_orbit_track();
+        if self.time_controls.compute_satellites {
+            self.update_satellite_positions();
+            // Update orbit track if selected
+            self.update_orbit_track();
+        } else {
+            self.satellite_positions.clear();
+            self.satellite_instances.clear();
+            self.orbit_track.clear();
+        }
 
         // Update wgpu render data
         self.update_wgpu_render_data(frame);
@@ -599,11 +627,16 @@ impl eframe::App for SpaceDbApp {
                 ui.separator();
                 self.time_controls.show(ui, &self.propagator.format_time());
                 ui.separator();
+                let visible_count = if self.time_controls.show_satellites {
+                    self.satellite_instances.len()
+                } else {
+                    0
+                };
                 ui.label(format!(
                     "Objects: {} | Propagating: {} | Visible: {}",
                     self.stats.total_objects,
                     self.propagator.tle_count(),
-                    self.satellite_instances.len()
+                    visible_count
                 ));
                 if self.wgpu_initialized {
                     ui.separator();
@@ -645,7 +678,11 @@ impl eframe::App for SpaceDbApp {
                 let mut deselect = false;
 
                 // Get current state for display
-                let current_state = self.propagator.propagate(norad_id);
+                let current_state = if self.time_controls.compute_satellites {
+                    self.propagator.propagate(norad_id)
+                } else {
+                    None
+                };
 
                 egui::SidePanel::right("right_panel")
                     .default_width(320.0)
@@ -653,7 +690,13 @@ impl eframe::App for SpaceDbApp {
                         DetailPanel::show(ui, &obj, tle_age);
 
                         // Show current orbital state
-                        if let Some(state) = current_state {
+                        if !self.time_controls.compute_satellites {
+                            ui.separator();
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 120, 120),
+                                "Satellite propagation disabled",
+                            );
+                        } else if let Some(state) = current_state {
                             ui.separator();
                             ui.heading("Current State");
                             egui::Grid::new("state_grid")

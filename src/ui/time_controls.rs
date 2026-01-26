@@ -15,6 +15,10 @@ pub struct TimeControls {
     pub speed_index: usize,
     /// Orbit track resolution (points per orbit)
     pub orbit_points: u32,
+    /// Show satellites in the renderer
+    pub show_satellites: bool,
+    /// Compute satellite propagation each frame
+    pub compute_satellites: bool,
 }
 
 impl Default for TimeControls {
@@ -25,6 +29,8 @@ impl Default for TimeControls {
             speed_presets: vec![-100.0, -10.0, -1.0, 0.0, 1.0, 10.0, 100.0, 1000.0, 10000.0],
             speed_index: 4, // 1x
             orbit_points: 360,
+            show_satellites: true,
+            compute_satellites: true,
         }
     }
 }
@@ -79,6 +85,10 @@ impl TimeControls {
         ui.horizontal(|ui| {
             ui.label("Orbit points:");
             ui.add(egui::Slider::new(&mut self.orbit_points, 36..=720));
+            ui.separator();
+            ui.label("Satellites:");
+            ui.checkbox(&mut self.show_satellites, "Show");
+            ui.checkbox(&mut self.compute_satellites, "Compute");
         });
     }
 
