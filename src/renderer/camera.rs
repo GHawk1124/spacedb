@@ -19,6 +19,12 @@ pub struct Camera {
     pub near: f32,
     /// Far clip plane
     pub far: f32,
+    /// Minimum zoom distance
+    pub min_distance: f32,
+    /// Maximum zoom distance
+    pub max_distance: f32,
+    /// Default distance from target
+    pub default_distance: f32,
 }
 
 impl Default for Camera {
@@ -31,6 +37,9 @@ impl Default for Camera {
             fov: 45.0_f32.to_radians(),
             near: 0.01,
             far: 100.0,
+            min_distance: 1.1,
+            max_distance: 50.0,
+            default_distance: 4.0,
         }
     }
 }
@@ -70,7 +79,8 @@ impl Camera {
 
     /// Zoom the camera (mouse wheel)
     pub fn zoom(&mut self, delta: f32) {
-        self.distance = (self.distance * (1.0 - delta * 0.1)).clamp(1.1, 50.0);
+        self.distance =
+            (self.distance * (1.0 - delta * 0.1)).clamp(self.min_distance, self.max_distance);
     }
 
     /// Pan the camera (shift + mouse drag)
@@ -84,8 +94,27 @@ impl Camera {
     /// Focus on a point at a given altitude (in Earth radii)
     pub fn focus_on_altitude(&mut self, position: Vec3, altitude_er: f32) {
         // Position camera to view the satellite with Earth in background
+        self.enable_close_zoom(true);
         self.target = position;
-        self.distance = (altitude_er * 0.5).max(0.1);
+        self.distance = (altitude_er * 0.5).max(self.min_distance);
+    }
+
+    pub fn enable_close_zoom(&mut self, enabled: bool) {
+        if enabled {
+            self.min_distance = 0.05;
+            self.near = 0.001;
+        } else {
+            self.min_distance = 1.1;
+            self.near = 0.01;
+            if self.distance < self.default_distance {
+                self.distance = self.default_distance;
+            }
+        }
+    }
+
+    pub fn reset_to_earth(&mut self) {
+        self.target = Vec3::ZERO;
+        self.enable_close_zoom(false);
     }
 }
 

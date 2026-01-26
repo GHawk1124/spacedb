@@ -413,9 +413,10 @@ impl SpaceDbApp {
         self.satellite_positions.clear();
 
         for (norad_id, state) in self.satellite_states.iter() {
+            let is_selected = self.selected_object == Some(*norad_id);
             let speed = state.velocity.length();
 
-            if velocity_filter.enabled {
+            if velocity_filter.enabled && !is_selected {
                 if speed < min_speed || speed > max_speed {
                     continue;
                 }
@@ -439,11 +440,13 @@ impl SpaceDbApp {
 
             let position = state.position + state.velocity * extrapolate;
 
-            if is_occluded_by_earth(camera_pos, position) {
+            if is_selected {
+                self.satellite_positions.insert(*norad_id, position);
+            } else if is_occluded_by_earth(camera_pos, position) {
                 continue;
+            } else {
+                self.satellite_positions.insert(*norad_id, position);
             }
-
-            self.satellite_positions.insert(*norad_id, position);
 
             // Create instance for rendering
             let altitude_km = state.altitude_km;
@@ -457,8 +460,6 @@ impl SpaceDbApp {
                 color[2] *= fade;
             }
 
-            // Highlight selected satellite
-            let is_selected = self.selected_object == Some(*norad_id);
             let size = if is_selected { 3.0 } else { 1.0 };
 
             instances.push(SatelliteInstance {
@@ -905,6 +906,13 @@ impl eframe::App for SpaceDbApp {
             self.last_orbit_target = None;
         }
 
+        if let Some(norad_id) = self.selected_object {
+            if let Some(pos) = self.satellite_positions.get(&norad_id) {
+                self.camera.target = *pos;
+                self.camera.enable_close_zoom(true);
+            }
+        }
+
         // Top panel with time controls
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -958,6 +966,7 @@ impl eframe::App for SpaceDbApp {
                     self.selected_object,
                 ) {
                     self.selected_object = Some(new_sel);
+                    self.camera.enable_close_zoom(true);
 
                     // Zoom to selected object
                     if let Some(pos) = self.satellite_positions.get(&new_sel) {
@@ -1028,6 +1037,7 @@ impl eframe::App for SpaceDbApp {
 
                 if deselect {
                     self.selected_object = None;
+                    self.camera.reset_to_earth();
                 }
             }
         }
