@@ -1,6 +1,6 @@
 //! Search and filtering functionality for space objects
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nucleo::pattern::{CaseMatching, Normalization};
@@ -84,24 +84,31 @@ impl SearchIndex {
     }
 
     /// Search for objects matching a query string
-    pub fn search(&mut self, query: &str, limit: usize) -> Vec<u32> {
+    pub fn search(
+        &mut self,
+        query: &str,
+        limit: usize,
+        allowed_ids: Option<&HashSet<u32>>,
+    ) -> Vec<u32> {
         let query_lower = query.to_lowercase().trim().to_string();
 
         if query_lower.is_empty() {
             self.last_query.clear();
             self.matcher_running = false;
-            return self.sorted_by_name.iter().take(limit).copied().collect();
+            return filter_sorted(self.sorted_by_name.iter().copied(), limit, allowed_ids);
         }
 
         // Try exact match first
         if let Some(matches) = self.name_index.get(&query_lower) {
-            return matches.iter().take(limit).copied().collect();
+            return filter_sorted(matches.iter().copied(), limit, allowed_ids);
         }
 
         // Try NORAD ID
         if let Ok(norad) = query_lower.parse::<u32>() {
             if self.norad_to_idx.contains_key(&norad) {
-                return vec![norad];
+                if allowed_ids.map_or(true, |allowed| allowed.contains(&norad)) {
+                    return vec![norad];
+                }
             }
         }
 
@@ -124,9 +131,16 @@ impl SearchIndex {
         let snapshot = self.matcher.snapshot();
 
         let mut results = Vec::new();
-        let take = limit.min(snapshot.matched_item_count() as usize) as u32;
-        for item in snapshot.matched_items(0..take) {
-            results.push(item.data.norad);
+        let mut count = 0usize;
+        for item in snapshot.matched_items(0..snapshot.matched_item_count()) {
+            let norad = item.data.norad;
+            if allowed_ids.map_or(true, |allowed| allowed.contains(&norad)) {
+                results.push(norad);
+                count += 1;
+                if count >= limit {
+                    break;
+                }
+            }
         }
 
         results
@@ -140,6 +154,26 @@ impl SearchIndex {
     pub fn all_sorted(&self) -> &[u32] {
         &self.sorted_by_name
     }
+}
+
+fn filter_sorted(
+    iter: impl Iterator<Item = u32>,
+    limit: usize,
+    allowed_ids: Option<&HashSet<u32>>,
+) -> Vec<u32> {
+    let mut results = Vec::new();
+    if limit == 0 {
+        return results;
+    }
+    for norad in iter {
+        if allowed_ids.map_or(true, |allowed| allowed.contains(&norad)) {
+            results.push(norad);
+            if results.len() >= limit {
+                break;
+            }
+        }
+    }
+    results
 }
 
 /// Filter criteria for object browser

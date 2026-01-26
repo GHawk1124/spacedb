@@ -2,6 +2,7 @@
 
 use crate::data::{ObjectFilter, SearchIndex, SpaceObject, SpaceObjectDatabase};
 use egui::{Color32, RichText, Ui};
+use std::collections::HashSet;
 
 /// Search and filter panel state
 #[derive(Default)]
@@ -11,6 +12,8 @@ pub struct SearchPanel {
     pub filter: ObjectFilter,
     pub show_filters: bool,
     pub velocity_filter: VelocityFilter,
+    pub filters_dirty: bool,
+    pub apply_filters_requested: bool,
 }
 
 /// Velocity filtering controls (km/s)
@@ -36,7 +39,12 @@ impl Default for VelocityFilter {
 }
 
 impl SearchPanel {
-    pub fn show(&mut self, ui: &mut Ui, index: &mut SearchIndex) -> bool {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        index: &mut SearchIndex,
+        allowed_ids: Option<&HashSet<u32>>,
+    ) -> bool {
         let mut changed = false;
         ui.heading("Search");
 
@@ -44,15 +52,13 @@ impl SearchPanel {
         let response = ui.text_edit_singleline(&mut self.query);
         let query = self.query.trim();
         if response.changed() {
-            if query.is_empty() {
-                let _ = index.search("", 0);
-                self.results = index.all_sorted().to_vec();
-            } else {
-                self.results = index.search(query, usize::MAX);
-            }
+            self.results = index.search(query, usize::MAX, allowed_ids);
             changed = true;
         } else if !query.is_empty() && index.matcher_is_running() {
-            self.results = index.search(query, usize::MAX);
+            self.results = index.search(query, usize::MAX, allowed_ids);
+            changed = true;
+        } else if query.is_empty() && self.results.is_empty() {
+            self.results = index.search("", usize::MAX, allowed_ids);
             changed = true;
         }
 
@@ -75,20 +81,28 @@ impl SearchPanel {
                 .checkbox(&mut self.filter.has_tle_only, "Has TLE only")
                 .changed()
             {
+                self.filters_dirty = true;
                 changed = true;
             }
             if ui
                 .checkbox(&mut self.filter.exclude_decayed, "Exclude decayed")
                 .changed()
             {
+                self.filters_dirty = true;
                 changed = true;
             }
 
             ui.separator();
             ui.label("Object types:");
-            changed |= toggle_object_type(ui, &mut self.filter, "Payload", "PAYLOAD");
-            changed |= toggle_object_type(ui, &mut self.filter, "Rocket Body", "ROCKET BODY");
-            changed |= toggle_object_type(ui, &mut self.filter, "Debris", "DEBRIS");
+            let type_payload = toggle_object_type(ui, &mut self.filter, "Payload", "PAYLOAD");
+            let type_rocket =
+                toggle_object_type(ui, &mut self.filter, "Rocket Body", "ROCKET BODY");
+            let type_debris = toggle_object_type(ui, &mut self.filter, "Debris", "DEBRIS");
+            let types_changed = type_payload || type_rocket || type_debris;
+            if types_changed {
+                self.filters_dirty = true;
+                changed = true;
+            }
 
             ui.separator();
             if ui
@@ -98,6 +112,7 @@ impl SearchPanel {
                 if self.filter.size_filter_enabled && self.filter.size_max_m <= 0.0 {
                     self.filter.size_max_m = 100.0;
                 }
+                self.filters_dirty = true;
                 changed = true;
             }
             if self.filter.size_filter_enabled {
@@ -106,6 +121,7 @@ impl SearchPanel {
                 let max_resp = ui
                     .add(egui::Slider::new(&mut self.filter.size_max_m, 0.0..=100.0).text("Max m"));
                 if min_resp.changed() || max_resp.changed() {
+                    self.filters_dirty = true;
                     changed = true;
                 }
                 if ui
@@ -115,6 +131,7 @@ impl SearchPanel {
                     )
                     .changed()
                 {
+                    self.filters_dirty = true;
                     changed = true;
                 }
             }
@@ -127,6 +144,7 @@ impl SearchPanel {
                 if self.velocity_filter.enabled && self.velocity_filter.max_kms <= 0.0 {
                     self.velocity_filter.max_kms = 15.0;
                 }
+                self.filters_dirty = true;
                 changed = true;
             }
             if self.velocity_filter.enabled {
@@ -151,8 +169,18 @@ impl SearchPanel {
                     || slow_resp.changed()
                     || fast_resp.changed()
                 {
+                    self.filters_dirty = true;
                     changed = true;
                 }
+            }
+
+            ui.separator();
+            let apply_button =
+                ui.add_enabled(self.filters_dirty, egui::Button::new("Apply Filters"));
+            if apply_button.clicked() {
+                self.apply_filters_requested = true;
+                self.filters_dirty = false;
+                changed = true;
             }
         }
 
@@ -160,6 +188,12 @@ impl SearchPanel {
         ui.label(format!("{} results", self.results.len()));
 
         changed
+    }
+
+    pub fn take_apply_filters(&mut self) -> bool {
+        let requested = self.apply_filters_requested;
+        self.apply_filters_requested = false;
+        requested
     }
 }
 

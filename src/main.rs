@@ -8,7 +8,7 @@ mod propagation;
 mod renderer;
 mod ui;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -18,13 +18,13 @@ use anyhow::Result;
 use eframe::egui;
 use glam::Vec3;
 
-use data::{load_complete_database, DatabaseStats, SearchIndex, SpaceObjectDatabase};
+use data::{load_complete_database, DatabaseStats, ObjectFilter, SearchIndex, SpaceObjectDatabase};
 use propagation::{generate_orbit_track_from_tle, Propagator, SatelliteState, EARTH_RADIUS_KM};
 use renderer::{
     altitude_to_color, Camera, OrbitVertex, SatelliteInstance, SceneCallback, SceneRenderData,
     SceneRenderResources,
 };
-use ui::{BrowserPanel, DetailPanel, SearchPanel, TimeControls};
+use ui::{BrowserPanel, DetailPanel, SearchPanel, TimeControls, VelocityFilter};
 
 #[derive(Debug)]
 enum Sgp4Command {
@@ -122,8 +122,9 @@ pub struct SpaceDbApp {
 
     // Filtering and worker state
     filtered_norad_ids: Vec<u32>,
-    last_object_filter_signature: u64,
-    last_velocity_filter_signature: u64,
+    filtered_norad_set: HashSet<u32>,
+    active_filter: ObjectFilter,
+    active_velocity_filter: VelocityFilter,
     sgp4_worker: Option<Sgp4Worker>,
 
     // 3D Renderer state
@@ -145,7 +146,7 @@ impl SpaceDbApp {
         let database = load_complete_database(&db_path, &discos_path)?;
 
         log::info!("Building search index...");
-        let search_index = SearchIndex::build(&database);
+        let mut search_index = SearchIndex::build(&database);
 
         let stats = DatabaseStats::from_database(&database);
         log::info!("Database stats: {:?}", stats);
@@ -157,9 +158,13 @@ impl SpaceDbApp {
 
         // Initialize search with all objects
         let mut search_panel = SearchPanel::default();
-        search_panel.results = search_index.all_sorted().to_vec();
         search_panel.filter.has_tle_only = true;
         search_panel.filter.exclude_decayed = true;
+        let active_filter = search_panel.filter.clone();
+        let active_velocity_filter = search_panel.velocity_filter.clone();
+        let filtered_norad_ids = build_filtered_ids(&database, &search_index, &active_filter);
+        let filtered_norad_set: HashSet<u32> = filtered_norad_ids.iter().copied().collect();
+        search_panel.results = search_index.search("", usize::MAX, Some(&filtered_norad_set));
 
         // Initialize wgpu renderer if available
         let wgpu_initialized = if let Some(wgpu_render_state) = &cc.wgpu_render_state {
@@ -210,9 +215,10 @@ impl SpaceDbApp {
             orbit_track_update_accumulator: 0.0,
             last_orbit_target: None,
             last_orbit_points: 0,
-            filtered_norad_ids: Vec::new(),
-            last_object_filter_signature: 0,
-            last_velocity_filter_signature: 0,
+            filtered_norad_ids,
+            filtered_norad_set,
+            active_filter,
+            active_velocity_filter,
             sgp4_worker: None,
             wgpu_initialized,
             last_frame_time: std::time::Instant::now(),
@@ -224,88 +230,52 @@ impl SpaceDbApp {
     fn ensure_sgp4_worker(&mut self) {
         if self.sgp4_worker.is_none() {
             self.sgp4_worker = Some(Sgp4Worker::new(self.propagator.clone_for_worker()));
-            self.last_object_filter_signature = 0;
+            if let Some(worker) = &self.sgp4_worker {
+                let _ = worker
+                    .sender
+                    .send(Sgp4Command::SetIds(self.filtered_norad_ids.clone()));
+            }
         }
     }
 
-    fn object_filter_signature(&self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+    fn apply_filters(&mut self) {
+        self.active_filter = self.search_panel.filter.clone();
+        self.active_velocity_filter = self.search_panel.velocity_filter.clone();
 
-        let mut hasher = DefaultHasher::new();
-        self.search_panel.query.hash(&mut hasher);
-        self.search_panel.filter.has_tle_only.hash(&mut hasher);
-        self.search_panel.filter.exclude_decayed.hash(&mut hasher);
-        self.search_panel
-            .filter
-            .size_filter_enabled
-            .hash(&mut hasher);
-        self.search_panel
-            .filter
-            .include_unknown_size
-            .hash(&mut hasher);
-        self.search_panel
-            .filter
-            .size_min_m
-            .to_bits()
-            .hash(&mut hasher);
-        self.search_panel
-            .filter
-            .size_max_m
-            .to_bits()
-            .hash(&mut hasher);
+        self.filtered_norad_ids =
+            build_filtered_ids(&self.database, &self.search_index, &self.active_filter);
+        self.filtered_norad_set = self.filtered_norad_ids.iter().copied().collect();
 
-        let mut types = self.search_panel.filter.object_types.clone();
-        types.sort();
-        for t in types {
-            t.hash(&mut hasher);
+        self.search_panel.results = self.search_index.search(
+            self.search_panel.query.as_str(),
+            usize::MAX,
+            Some(&self.filtered_norad_set),
+        );
+
+        if let Some(worker) = &self.sgp4_worker {
+            let _ = worker
+                .sender
+                .send(Sgp4Command::SetIds(self.filtered_norad_ids.clone()));
+            let _ = worker.sender.send(Sgp4Command::Propagate {
+                time: *self.propagator.current_time(),
+            });
         }
 
-        let mut countries = self.search_panel.filter.countries.clone();
-        countries.sort();
-        for c in countries {
-            c.hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-
-    fn refresh_filtered_ids(&mut self) -> bool {
-        let signature = self.object_filter_signature();
-        if signature != self.last_object_filter_signature {
-            self.rebuild_filtered_ids();
-            self.last_object_filter_signature = signature;
-            return true;
-        }
-        false
-    }
-
-    fn velocity_filter_signature(&self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        let filter = &self.search_panel.velocity_filter;
-        filter.enabled.hash(&mut hasher);
-        filter.min_kms.to_bits().hash(&mut hasher);
-        filter.max_kms.to_bits().hash(&mut hasher);
-        filter.slow_percent.to_bits().hash(&mut hasher);
-        filter.fast_percent.to_bits().hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn rebuild_filtered_ids(&mut self) {
-        let mut ids = Vec::new();
-
-        for &norad_id in &self.search_panel.results {
-            let norad_str = norad_id.to_string();
-            if let Some(obj) = self.database.objects.get(&norad_str) {
-                if self.search_panel.filter.matches(obj) {
-                    ids.push(norad_id);
-                }
+        if let Some(selected) = self.selected_object {
+            if !self.filtered_norad_set.contains(&selected) {
+                self.selected_object = None;
+                self.camera.reset_to_earth();
+                self.orbit_track = Arc::new(Vec::new());
+                self.last_orbit_target = None;
             }
         }
 
-        self.filtered_norad_ids = ids;
+        self.satellite_states.clear();
+        self.satellite_instances = Arc::new(Vec::new());
+        self.satellite_positions.clear();
+        self.last_states_time = None;
+        let update_hz = self.time_controls.sgp4_update_hz.clamp(1.0, 20.0) as f64;
+        self.satellite_update_accumulator = 1.0 / update_hz;
     }
 
     fn process_sgp4_worker(&mut self, frame_time: f64) {
@@ -313,21 +283,6 @@ impl SpaceDbApp {
 
         let update_hz = self.time_controls.sgp4_update_hz.clamp(1.0, 20.0) as f64;
         let update_interval = 1.0 / update_hz;
-
-        if self.refresh_filtered_ids() {
-            if let Some(worker) = &self.sgp4_worker {
-                let _ = worker
-                    .sender
-                    .send(Sgp4Command::SetIds(self.filtered_norad_ids.clone()));
-            }
-            self.satellite_update_accumulator = update_interval;
-        }
-
-        let velocity_signature = self.velocity_filter_signature();
-        let velocity_filter_changed = velocity_signature != self.last_velocity_filter_signature;
-        if velocity_filter_changed {
-            self.last_velocity_filter_signature = velocity_signature;
-        }
 
         self.satellite_update_accumulator += frame_time.max(0.0);
 
@@ -350,13 +305,11 @@ impl SpaceDbApp {
             self.satellite_states = result.states;
             self.last_states_time = Some(result.time);
             self.rebuild_satellite_instances();
-        } else if velocity_filter_changed {
-            self.rebuild_satellite_instances();
         }
     }
 
     fn rebuild_satellite_instances(&mut self) {
-        let velocity_filter = &self.search_panel.velocity_filter;
+        let velocity_filter = &self.active_velocity_filter;
         let mut min_speed = velocity_filter.min_kms;
         let mut max_speed = velocity_filter.max_kms;
         if max_speed < min_speed {
@@ -955,14 +908,17 @@ impl eframe::App for SpaceDbApp {
         egui::SidePanel::left("left_panel")
             .default_width(300.0)
             .show(ctx, |ui| {
-                self.search_panel.show(ui, &mut self.search_index);
-                self.refresh_filtered_ids();
+                self.search_panel
+                    .show(ui, &mut self.search_index, Some(&self.filtered_norad_set));
+                if self.search_panel.take_apply_filters() {
+                    self.apply_filters();
+                }
                 ui.separator();
 
                 if let Some(new_sel) = self.browser_panel.show(
                     ui,
                     &self.database,
-                    &self.filtered_norad_ids,
+                    &self.search_panel.results,
                     self.selected_object,
                 ) {
                     self.selected_object = Some(new_sel);
@@ -1122,4 +1078,21 @@ fn main() -> Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
+}
+
+fn build_filtered_ids(
+    database: &SpaceObjectDatabase,
+    search_index: &SearchIndex,
+    filter: &ObjectFilter,
+) -> Vec<u32> {
+    let mut ids = Vec::new();
+    for &norad_id in search_index.all_sorted() {
+        let norad_str = norad_id.to_string();
+        if let Some(obj) = database.objects.get(&norad_str) {
+            if filter.matches(obj) {
+                ids.push(norad_id);
+            }
+        }
+    }
+    ids
 }
