@@ -947,7 +947,7 @@ impl eframe::App for SpaceDbApp {
         egui::SidePanel::left("left_panel")
             .default_width(300.0)
             .show(ctx, |ui| {
-                self.search_panel.show(ui, &self.search_index);
+                self.search_panel.show(ui, &mut self.search_index);
                 self.refresh_filtered_ids();
                 ui.separator();
 

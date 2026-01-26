@@ -36,14 +36,23 @@ impl Default for VelocityFilter {
 }
 
 impl SearchPanel {
-    pub fn show(&mut self, ui: &mut Ui, index: &SearchIndex) -> bool {
+    pub fn show(&mut self, ui: &mut Ui, index: &mut SearchIndex) -> bool {
         let mut changed = false;
         ui.heading("Search");
 
         // Search box
         let response = ui.text_edit_singleline(&mut self.query);
+        let query = self.query.trim();
         if response.changed() {
-            self.results = index.search(&self.query, 100);
+            if query.is_empty() {
+                let _ = index.search("", 0);
+                self.results = index.all_sorted().to_vec();
+            } else {
+                self.results = index.search(query, usize::MAX);
+            }
+            changed = true;
+        } else if !query.is_empty() && index.matcher_is_running() {
+            self.results = index.search(query, usize::MAX);
             changed = true;
         }
 

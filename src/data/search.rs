@@ -1,6 +1,10 @@
 //! Search and filtering functionality for space objects
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use nucleo::pattern::{CaseMatching, Normalization};
+use nucleo::{Config, Nucleo, Utf32String};
 
 use super::{SpaceObject, SpaceObjectDatabase};
 
@@ -12,6 +16,17 @@ pub struct SearchIndex {
     sorted_by_name: Vec<u32>,
     /// NORAD ID -> index in sorted_by_name
     norad_to_idx: HashMap<u32, usize>,
+    /// Fuzzy matcher
+    matcher: Nucleo<SearchItem>,
+    /// Last query used for append optimization
+    last_query: String,
+    /// Whether matcher is still running
+    matcher_running: bool,
+}
+
+struct SearchItem {
+    norad: u32,
+    haystack: String,
 }
 
 impl SearchIndex {
@@ -19,6 +34,8 @@ impl SearchIndex {
     pub fn build(db: &SpaceObjectDatabase) -> Self {
         let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
         let mut items: Vec<(String, u32)> = Vec::with_capacity(db.objects.len());
+        let matcher = Nucleo::new(Config::DEFAULT, Arc::new(|| {}), None, 1);
+        let injector = matcher.injector();
 
         for (norad_str, obj) in &db.objects {
             let norad = match norad_str.parse::<u32>() {
@@ -29,16 +46,17 @@ impl SearchIndex {
             let name = obj.display_name();
             let name_lower = name.to_lowercase();
 
-            // Index by words in name
-            for word in name_lower.split_whitespace() {
-                name_index.entry(word.to_string()).or_default().push(norad);
-            }
-
             // Also index full name
             name_index
                 .entry(name_lower.clone())
                 .or_default()
                 .push(norad);
+
+            let haystack = format!("{} {}", name_lower, norad);
+            let item = SearchItem { norad, haystack };
+            injector.push(item, |data, cols| {
+                cols[0] = Utf32String::from(data.haystack.as_str());
+            });
 
             items.push((name, norad));
         }
@@ -59,14 +77,19 @@ impl SearchIndex {
             name_index,
             sorted_by_name,
             norad_to_idx,
+            matcher,
+            last_query: String::new(),
+            matcher_running: false,
         }
     }
 
     /// Search for objects matching a query string
-    pub fn search(&self, query: &str, limit: usize) -> Vec<u32> {
+    pub fn search(&mut self, query: &str, limit: usize) -> Vec<u32> {
         let query_lower = query.to_lowercase().trim().to_string();
 
         if query_lower.is_empty() {
+            self.last_query.clear();
+            self.matcher_running = false;
             return self.sorted_by_name.iter().take(limit).copied().collect();
         }
 
@@ -82,24 +105,35 @@ impl SearchIndex {
             }
         }
 
-        // Prefix matching on words
-        let mut results: Vec<u32> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let pattern_changed = query_lower != self.last_query;
+        if pattern_changed {
+            let append = query_lower.starts_with(&self.last_query)
+                && query_lower.len() > self.last_query.len();
+            self.matcher.pattern.reparse(
+                0,
+                &query_lower,
+                CaseMatching::Respect,
+                Normalization::Smart,
+                append,
+            );
+            self.last_query = query_lower;
+        }
 
-        for (key, norads) in &self.name_index {
-            if key.starts_with(&query_lower) || key.contains(&query_lower) {
-                for &norad in norads {
-                    if seen.insert(norad) {
-                        results.push(norad);
-                        if results.len() >= limit {
-                            return results;
-                        }
-                    }
-                }
-            }
+        let status = self.matcher.tick(10);
+        self.matcher_running = status.running;
+        let snapshot = self.matcher.snapshot();
+
+        let mut results = Vec::new();
+        let take = limit.min(snapshot.matched_item_count() as usize) as u32;
+        for item in snapshot.matched_items(0..take) {
+            results.push(item.data.norad);
         }
 
         results
+    }
+
+    pub fn matcher_is_running(&self) -> bool {
+        self.matcher_running
     }
 
     /// Get all objects sorted by name (for browsing)
