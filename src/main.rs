@@ -492,7 +492,7 @@ impl SpaceDbApp {
         if let Some(norad_id) = current_target {
             // Get the TLE for this satellite directly from propagator
             if let Some(tle) = self.propagator.get_tle(norad_id) {
-                let color = [0.0, 1.0, 0.5, 0.8]; // Cyan-green
+                let color = [1.0, 0.15, 0.15, 1.0]; // Bright red
                 let track = generate_orbit_track_from_tle(
                     tle,
                     self.propagator.current_time(),

@@ -511,8 +511,8 @@ impl SceneRenderResources {
             cache: None,
         });
 
-        // Orbit track pipeline (line strip)
-        let orbit_capacity = 1024u32;
+        // Orbit track pipeline (ribbon)
+        let orbit_capacity = 4096u32;
         let orbit_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Orbit Track Buffer"),
             size: (orbit_capacity as usize * std::mem::size_of::<OrbitVertex>()) as u64,
@@ -552,7 +552,7 @@ impl SceneRenderResources {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineStrip,
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -1116,7 +1116,7 @@ impl SceneRenderResources {
             render_pass.draw_indexed(0..self.earth_index_count, 0, 0..1);
 
             // Draw orbit track (if any)
-            if orbit_count > 1 {
+            if orbit_count > 3 {
                 render_pass.set_pipeline(&self.orbit_pipeline);
                 render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.orbit_buffer.slice(..));
@@ -1519,11 +1519,13 @@ struct CameraUniform {
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) side: f32,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) side: f32,
 };
 
 @vertex
@@ -1531,12 +1533,17 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
     out.color = in.color;
+    out.side = in.side;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+    let edge = 1.0 - abs(in.side);
+    let glow = pow(clamp(edge, 0.0, 1.0), 0.5);
+    let alpha = in.color.a * (0.5 + 0.7 * glow);
+    let rgb = in.color.rgb * (0.8 + 0.9 * glow);
+    return vec4<f32>(rgb, alpha);
 }
 "##;
 

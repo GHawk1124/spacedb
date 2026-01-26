@@ -13,7 +13,8 @@ pub fn generate_orbit_track_from_tle(
     num_points: u32,
     color: [f32; 4],
 ) -> Vec<OrbitVertex> {
-    let mut vertices = Vec::with_capacity(num_points as usize + 1);
+    let mut vertices = Vec::with_capacity((num_points as usize + 1) * 2);
+    let mut positions: Vec<Vec3> = Vec::with_capacity(num_points as usize + 1);
 
     // Get current state to estimate orbital period
     let mut tle = tle.clone();
@@ -26,7 +27,7 @@ pub fn generate_orbit_track_from_tle(
 
     // Calculate orbital period
     let mu = 398600.4418_f64;
-    let radius_km = (pos[0].powi(2) + pos[1].powi(2) + pos[2].powi(2)).sqrt();
+    let radius_km = (pos[0].powi(2) + pos[1].powi(2) + pos[2].powi(2)).sqrt() / 1000.0;
     let period_seconds = 2.0 * std::f64::consts::PI * (radius_km.powi(3) / mu).sqrt();
 
     // Propagate for one full orbit
@@ -43,20 +44,88 @@ pub fn generate_orbit_track_from_tle(
             let pos = result.pos.column(0);
             let pos_er = Vec3::new(
                 pos[0] as f32 / 1000.0 / EARTH_RADIUS_KM as f32,
-                pos[2] as f32 / 1000.0 / EARTH_RADIUS_KM as f32, // TEME Z (polar) -> Render Y (up)
-                pos[1] as f32 / 1000.0 / EARTH_RADIUS_KM as f32, // TEME Y -> Render Z
+                pos[2] as f32 / 1000.0 / EARTH_RADIUS_KM as f32, // TEME Z -> Render Y
+                -pos[1] as f32 / 1000.0 / EARTH_RADIUS_KM as f32, // TEME Y -> Render -Z
             );
 
-            // Color gradient: past (dim) -> present (bright) -> future (dim)
-            let t = i as f32 / num_points as f32;
-            let brightness = 1.0 - 2.0 * (t - 0.5).abs();
-            let alpha = 0.3 + 0.7 * brightness;
-
-            vertices.push(OrbitVertex {
-                position: pos_er.to_array(),
-                color: [color[0], color[1], color[2], color[3] * alpha],
-            });
+            positions.push(pos_er);
         }
+    }
+
+    let thickness = 0.014_f32; // Earth radii
+    let count = positions.len();
+
+    for i in 0..count {
+        let pos = positions[i];
+        let prev = if i == 0 {
+            positions[i]
+        } else {
+            positions[i - 1]
+        };
+        let next = if i + 1 >= count {
+            positions[i]
+        } else {
+            positions[i + 1]
+        };
+
+        let mut tangent = next - prev;
+        let tangent_len = tangent.length();
+        if tangent_len > 1.0e-6 {
+            tangent /= tangent_len;
+        } else {
+            tangent = Vec3::X;
+        }
+
+        let mut radial = pos;
+        let radial_len = radial.length();
+        if radial_len > 1.0e-6 {
+            radial /= radial_len;
+        } else {
+            radial = Vec3::Y;
+        }
+
+        let mut plane_normal = tangent.cross(radial);
+        let plane_len = plane_normal.length();
+        if plane_len > 1.0e-6 {
+            plane_normal /= plane_len;
+        } else {
+            plane_normal = radial.cross(Vec3::Y);
+            let nlen = plane_normal.length();
+            if nlen > 1.0e-6 {
+                plane_normal /= nlen;
+            } else {
+                plane_normal = Vec3::Z;
+            }
+        }
+
+        let mut offset_dir = plane_normal.cross(tangent);
+        let offset_len = offset_dir.length();
+        if offset_len > 1.0e-6 {
+            offset_dir /= offset_len;
+        } else {
+            offset_dir = Vec3::X;
+        }
+
+        let offset = offset_dir * thickness;
+        let left = pos + offset;
+        let right = pos - offset;
+
+        // Color gradient: past (dim) -> present (bright) -> future (dim)
+        let t = i as f32 / (count - 1).max(1) as f32;
+        let brightness = 0.6 + 0.4 * (1.0 - 2.0 * (t - 0.5).abs());
+        let alpha = (color[3] * brightness).min(1.0);
+        let final_color = [color[0], color[1], color[2], alpha];
+
+        vertices.push(OrbitVertex {
+            position: left.to_array(),
+            color: final_color,
+            side: -1.0,
+        });
+        vertices.push(OrbitVertex {
+            position: right.to_array(),
+            color: final_color,
+            side: 1.0,
+        });
     }
 
     vertices

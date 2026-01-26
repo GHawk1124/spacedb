@@ -84,6 +84,7 @@ pub fn altitude_to_color(altitude_km: f64) -> [f32; 4] {
 pub struct OrbitVertex {
     pub position: [f32; 3],
     pub color: [f32; 4],
+    pub side: f32,
 }
 
 impl OrbitVertex {
@@ -101,6 +102,11 @@ impl OrbitVertex {
                     offset: 12,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 28,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32,
                 },
             ],
         }
