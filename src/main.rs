@@ -274,14 +274,14 @@ impl SpaceDbApp {
         self.satellite_instances = Arc::new(Vec::new());
         self.satellite_positions.clear();
         self.last_states_time = None;
-        let update_hz = self.time_controls.sgp4_update_hz.clamp(1.0, 20.0) as f64;
+        let update_hz = self.time_controls.sgp4_update_hz.clamp(1.0, 60.0) as f64;
         self.satellite_update_accumulator = 1.0 / update_hz;
     }
 
     fn process_sgp4_worker(&mut self, frame_time: f64) {
         self.ensure_sgp4_worker();
 
-        let update_hz = self.time_controls.sgp4_update_hz.clamp(1.0, 20.0) as f64;
+        let update_hz = self.time_controls.sgp4_update_hz.clamp(1.0, 60.0) as f64;
         let update_interval = 1.0 / update_hz;
 
         self.satellite_update_accumulator += frame_time.max(0.0);
@@ -871,11 +871,8 @@ impl eframe::App for SpaceDbApp {
             ui.horizontal(|ui| {
                 ui.heading("SpaceDB");
                 ui.separator();
-                if ui.button("Settings").clicked() {
-                    self.show_settings_window = true;
-                }
-                ui.separator();
-                ui.label(format!("Time: {}", self.propagator.format_time()));
+                self.time_controls
+                    .show_top_bar(ui, &self.propagator.format_time());
                 ui.separator();
                 let visible_count = if self.time_controls.show_satellites {
                     self.satellite_instances.len()
@@ -892,6 +889,11 @@ impl eframe::App for SpaceDbApp {
                     ui.separator();
                     ui.label(egui::RichText::new("GPU").color(egui::Color32::GREEN));
                 }
+
+                ui.separator();
+                if ui.button("Settings").clicked() {
+                    self.show_settings_window = true;
+                }
             });
         });
 
@@ -900,7 +902,7 @@ impl eframe::App for SpaceDbApp {
                 .open(&mut self.show_settings_window)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    self.time_controls.show(ui, &self.propagator.format_time());
+                    self.time_controls.show_settings(ui);
                 });
         }
 

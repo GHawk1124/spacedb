@@ -28,12 +28,14 @@ pub struct TimeControls {
 impl Default for TimeControls {
     fn default() -> Self {
         Self {
-            playing: true,
+            playing: false,
             speed: 1.0,
-            speed_presets: vec![-100.0, -10.0, -1.0, 0.0, 1.0, 10.0, 100.0, 1000.0, 10000.0],
-            speed_index: 4, // 1x
+            speed_presets: vec![
+                -10000.0, -1000.0, -100.0, -10.0, -1.0, 1.0, 10.0, 100.0, 1000.0, 10000.0,
+            ],
+            speed_index: 5, // 1x
             orbit_points: 360,
-            sgp4_update_hz: 5.0,
+            sgp4_update_hz: 20.0,
             max_fps: 120.0,
             show_satellites: true,
             compute_satellites: true,
@@ -42,8 +44,7 @@ impl Default for TimeControls {
 }
 
 impl TimeControls {
-    pub fn show(&mut self, ui: &mut Ui, current_time: &str) {
-        ui.label("Time Controls");
+    pub fn show_top_bar(&mut self, ui: &mut Ui, current_time: &str) {
         ui.horizontal(|ui| {
             let play_text = if self.playing { "⏸" } else { "▶" };
             if ui.button(play_text).clicked() {
@@ -51,15 +52,11 @@ impl TimeControls {
             }
 
             if ui.button("⏪").clicked() {
-                if self.speed > 0.0 {
-                    self.speed = -self.speed;
-                }
+                self.step_time_scale(-1);
             }
 
             if ui.button("⏩").clicked() {
-                if self.speed < 0.0 {
-                    self.speed = -self.speed;
-                }
+                self.step_time_scale(1);
             }
 
             ui.separator();
@@ -67,31 +64,81 @@ impl TimeControls {
             egui::ComboBox::from_id_salt("speed_select")
                 .selected_text(format_speed(self.speed))
                 .show_ui(ui, |ui| {
-                    for (i, &preset) in self.speed_presets.iter().enumerate() {
+                    let presets = self.speed_presets.clone();
+                    for (i, preset) in presets.into_iter().enumerate() {
                         if ui
                             .selectable_value(&mut self.speed_index, i, format_speed(preset))
                             .clicked()
                         {
-                            self.speed = preset;
+                            self.set_speed(preset);
+                            self.playing = true;
                         }
                     }
                 });
+
+            ui.separator();
+            ui.label(format!("Time: {}", current_time));
         });
+    }
 
-        ui.label(format!("Current time: {}", current_time));
-        ui.separator();
-
+    pub fn show_settings(&mut self, ui: &mut Ui) {
         ui.label("Satellites");
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.show_satellites, "Show");
             ui.checkbox(&mut self.compute_satellites, "Compute");
         });
         ui.add(egui::Slider::new(&mut self.orbit_points, 36..=720).text("Orbit points"));
-        ui.add(egui::Slider::new(&mut self.sgp4_update_hz, 1.0..=20.0).text("SGP4 Hz"));
+        ui.add(egui::Slider::new(&mut self.sgp4_update_hz, 1.0..=60.0).text("SGP4 Hz"));
 
         ui.separator();
         ui.label("Performance");
         ui.add(egui::Slider::new(&mut self.max_fps, 20.0..=500.0).text("Max FPS"));
+    }
+
+    fn set_speed(&mut self, speed: f64) {
+        self.speed = speed;
+        if let Some((index, _)) = self
+            .speed_presets
+            .iter()
+            .enumerate()
+            .find(|(_, &preset)| (preset - speed).abs() < f64::EPSILON)
+        {
+            self.speed_index = index;
+        }
+    }
+
+    fn step_time_scale(&mut self, direction: i32) {
+        let mut magnitudes: Vec<f64> = self.speed_presets.iter().map(|s| s.abs()).collect();
+        magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        magnitudes.dedup_by(|a, b| (*a - *b).abs() < f64::EPSILON);
+
+        let current_mag = self.speed.abs();
+        let mut idx = magnitudes
+            .iter()
+            .position(|m| (*m - current_mag).abs() < f64::EPSILON)
+            .unwrap_or_else(|| {
+                let mut best = 0usize;
+                let mut best_diff = f64::MAX;
+                for (i, m) in magnitudes.iter().enumerate() {
+                    let diff = (*m - current_mag).abs();
+                    if diff < best_diff {
+                        best = i;
+                        best_diff = diff;
+                    }
+                }
+                best
+            });
+
+        if direction > 0 && idx + 1 < magnitudes.len() {
+            idx += 1;
+        } else if direction < 0 && idx > 0 {
+            idx -= 1;
+        }
+
+        let sign = if self.speed < 0.0 { -1.0 } else { 1.0 };
+        let next_speed = magnitudes[idx] * sign;
+        self.set_speed(next_speed);
+        self.playing = true;
     }
 
     /// Get the time delta for this frame
