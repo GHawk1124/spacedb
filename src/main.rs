@@ -4,6 +4,7 @@
 //! using data from multiple sources including Space-Track, GCAT, and DISCOS.
 
 mod data;
+mod analysis;
 mod propagation;
 mod renderer;
 mod ui;
@@ -15,6 +16,7 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use eframe::egui;
 use glam::Vec3;
 
@@ -25,6 +27,19 @@ use renderer::{
     SceneRenderResources,
 };
 use ui::{BrowserPanel, DetailPanel, SearchPanel, TimeControls, VelocityFilter};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run collision analysis without rendering
+    Collisions(analysis::CollisionArgs),
+}
 
 #[derive(Debug)]
 enum Sgp4Command {
@@ -1131,6 +1146,17 @@ fn is_occluded_by_earth(camera_pos: Vec3, sat_pos: Vec3) -> bool {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    let cli = Cli::parse();
+    if let Some(command) = cli.command {
+        match command {
+            Command::Collisions(args) => return analysis::run_collision_scan(args),
+        }
+    }
+
+    run_gui()
+}
+
+fn run_gui() -> Result<()> {
     log::info!("Starting SpaceDB...");
 
     let options = eframe::NativeOptions {
