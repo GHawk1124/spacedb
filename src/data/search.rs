@@ -187,6 +187,10 @@ pub struct ObjectFilter {
     pub size_min_m: f64,
     pub size_max_m: f64,
     pub include_unknown_size: bool,
+    pub mass_filter_enabled: bool,
+    pub mass_min_kg: f64,
+    pub mass_max_kg: f64,
+    pub include_unknown_mass: bool,
 }
 
 impl Default for ObjectFilter {
@@ -200,6 +204,10 @@ impl Default for ObjectFilter {
             size_min_m: 0.0,
             size_max_m: 0.0,
             include_unknown_size: true,
+            mass_filter_enabled: false,
+            mass_min_kg: 0.0,
+            mass_max_kg: 0.0,
+            include_unknown_mass: true,
         }
     }
 }
@@ -245,6 +253,24 @@ impl ObjectFilter {
                     return false;
                 }
             } else if !self.include_unknown_size {
+                return false;
+            }
+        }
+
+        // Mass filter (requires DISCOS data)
+        if self.mass_filter_enabled {
+            if let Some(discos) = &obj.discos {
+                if let Some(mass) = discos.mass {
+                    if self.mass_min_kg > 0.0 && mass < self.mass_min_kg {
+                        return false;
+                    }
+                    if self.mass_max_kg > 0.0 && mass > self.mass_max_kg {
+                        return false;
+                    }
+                } else if !self.include_unknown_mass {
+                    return false;
+                }
+            } else if !self.include_unknown_mass {
                 return false;
             }
         }

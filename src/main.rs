@@ -123,8 +123,12 @@ pub struct SpaceDbApp {
     // Filtering and worker state
     filtered_norad_ids: Vec<u32>,
     filtered_norad_set: HashSet<u32>,
+    filtered_norad_dynamic_set: HashSet<u32>,
+    dynamic_filter_ready: bool,
     active_filter: ObjectFilter,
     active_velocity_filter: VelocityFilter,
+    active_altitude_filter: ui::AltitudeFilter,
+    active_tle_age_filter: ui::TleAgeFilter,
     sgp4_worker: Option<Sgp4Worker>,
 
     // 3D Renderer state
@@ -162,8 +166,11 @@ impl SpaceDbApp {
         search_panel.filter.exclude_decayed = true;
         let active_filter = search_panel.filter.clone();
         let active_velocity_filter = search_panel.velocity_filter.clone();
+        let active_altitude_filter = search_panel.altitude_filter.clone();
+        let active_tle_age_filter = search_panel.tle_age_filter.clone();
         let filtered_norad_ids = build_filtered_ids(&database, &search_index, &active_filter);
         let filtered_norad_set: HashSet<u32> = filtered_norad_ids.iter().copied().collect();
+        let filtered_norad_dynamic_set = filtered_norad_set.clone();
         search_panel.results = search_index.search("", usize::MAX, Some(&filtered_norad_set));
 
         // Initialize wgpu renderer if available
@@ -217,8 +224,12 @@ impl SpaceDbApp {
             last_orbit_points: 0,
             filtered_norad_ids,
             filtered_norad_set,
+            filtered_norad_dynamic_set,
+            dynamic_filter_ready: false,
             active_filter,
             active_velocity_filter,
+            active_altitude_filter,
+            active_tle_age_filter,
             sgp4_worker: None,
             wgpu_initialized,
             last_frame_time: std::time::Instant::now(),
@@ -241,15 +252,20 @@ impl SpaceDbApp {
     fn apply_filters(&mut self) {
         self.active_filter = self.search_panel.filter.clone();
         self.active_velocity_filter = self.search_panel.velocity_filter.clone();
+        self.active_altitude_filter = self.search_panel.altitude_filter.clone();
+        self.active_tle_age_filter = self.search_panel.tle_age_filter.clone();
+        self.dynamic_filter_ready = false;
+        self.filtered_norad_dynamic_set = self.filtered_norad_set.clone();
 
         self.filtered_norad_ids =
             build_filtered_ids(&self.database, &self.search_index, &self.active_filter);
         self.filtered_norad_set = self.filtered_norad_ids.iter().copied().collect();
 
+        let allowed_ids = self.current_allowed_set().clone();
         self.search_panel.results = self.search_index.search(
             self.search_panel.query.as_str(),
             usize::MAX,
-            Some(&self.filtered_norad_set),
+            Some(&allowed_ids),
         );
 
         if let Some(worker) = &self.sgp4_worker {
@@ -262,7 +278,12 @@ impl SpaceDbApp {
         }
 
         if let Some(selected) = self.selected_object {
-            if !self.filtered_norad_set.contains(&selected) {
+            let dynamic_allowed = if self.dynamic_filters_enabled() {
+                self.filtered_norad_dynamic_set.contains(&selected)
+            } else {
+                true
+            };
+            if !self.filtered_norad_set.contains(&selected) || !dynamic_allowed {
                 self.selected_object = None;
                 self.camera.reset_to_earth();
                 self.orbit_track = Arc::new(Vec::new());
@@ -276,6 +297,23 @@ impl SpaceDbApp {
         self.last_states_time = None;
         let update_hz = self.time_controls.sgp4_update_hz.clamp(1.0, 60.0) as f64;
         self.satellite_update_accumulator = 1.0 / update_hz;
+    }
+
+    fn dynamic_filters_enabled(&self) -> bool {
+        self.active_velocity_filter.enabled
+            || self.active_altitude_filter.enabled
+            || self.active_tle_age_filter.enabled
+    }
+
+    fn current_allowed_set(&self) -> &HashSet<u32> {
+        if self.time_controls.compute_satellites
+            && self.dynamic_filters_enabled()
+            && self.dynamic_filter_ready
+        {
+            &self.filtered_norad_dynamic_set
+        } else {
+            &self.filtered_norad_set
+        }
     }
 
     fn process_sgp4_worker(&mut self, frame_time: f64) {
@@ -310,6 +348,8 @@ impl SpaceDbApp {
 
     fn rebuild_satellite_instances(&mut self) {
         let velocity_filter = &self.active_velocity_filter;
+        let altitude_filter = &self.active_altitude_filter;
+        let tle_age_filter = &self.active_tle_age_filter;
         let mut min_speed = velocity_filter.min_kms;
         let mut max_speed = velocity_filter.max_kms;
         if max_speed < min_speed {
@@ -363,43 +403,69 @@ impl SpaceDbApp {
         let camera_pos = self.camera.position();
 
         let mut instances = Vec::with_capacity(self.satellite_states.len());
+        let mut dynamic_allowed: HashSet<u32> = HashSet::with_capacity(self.satellite_states.len());
         self.satellite_positions.clear();
 
         for (norad_id, state) in self.satellite_states.iter() {
             let is_selected = self.selected_object == Some(*norad_id);
             let speed = state.velocity.length();
 
-            if velocity_filter.enabled && !is_selected {
+            let mut passes_dynamic = true;
+            if velocity_filter.enabled {
                 if speed < min_speed || speed > max_speed {
-                    continue;
+                    passes_dynamic = false;
                 }
 
                 if let Some(low) = low_threshold {
                     if speed > low {
                         if let Some(high) = high_threshold {
                             if speed < high {
-                                continue;
+                                passes_dynamic = false;
                             }
                         } else {
-                            continue;
+                            passes_dynamic = false;
                         }
                     }
                 } else if let Some(high) = high_threshold {
                     if speed < high {
-                        continue;
+                        passes_dynamic = false;
                     }
                 }
             }
 
+            if altitude_filter.enabled {
+                let alt_km = state.altitude_km as f32;
+                let min_alt = altitude_filter.min_km.min(altitude_filter.max_km);
+                let max_alt = altitude_filter.min_km.max(altitude_filter.max_km);
+                if alt_km < min_alt || alt_km > max_alt {
+                    passes_dynamic = false;
+                }
+            }
+
+            if tle_age_filter.enabled {
+                let age = state.tle_age_days as f32;
+                let min_age = tle_age_filter.min_days.min(tle_age_filter.max_days);
+                let max_age = tle_age_filter.min_days.max(tle_age_filter.max_days);
+                if age < min_age || age > max_age {
+                    passes_dynamic = false;
+                }
+            }
+
+            if self.dynamic_filters_enabled() && !passes_dynamic {
+                continue;
+            }
+
             let position = state.position + state.velocity * extrapolate;
 
-            if is_selected {
-                self.satellite_positions.insert(*norad_id, position);
-            } else if is_occluded_by_earth(camera_pos, position) {
-                continue;
-            } else {
-                self.satellite_positions.insert(*norad_id, position);
+            if self.dynamic_filters_enabled() {
+                dynamic_allowed.insert(*norad_id);
             }
+
+            if is_occluded_by_earth(camera_pos, position) {
+                continue;
+            }
+
+            self.satellite_positions.insert(*norad_id, position);
 
             // Create instance for rendering
             let altitude_km = state.altitude_km;
@@ -423,6 +489,16 @@ impl SpaceDbApp {
         }
 
         self.satellite_instances = Arc::new(instances);
+        if self.dynamic_filters_enabled() {
+            self.filtered_norad_dynamic_set = dynamic_allowed;
+            self.dynamic_filter_ready = true;
+            let allowed_ids = self.current_allowed_set().clone();
+            self.search_panel.results = self.search_index.search(
+                self.search_panel.query.as_str(),
+                usize::MAX,
+                Some(&allowed_ids),
+            );
+        }
     }
 
     fn update_orbit_track(&mut self, time_delta: f64) {
@@ -857,6 +933,8 @@ impl eframe::App for SpaceDbApp {
             self.orbit_track = Arc::new(Vec::new());
             self.orbit_track_update_accumulator = 0.0;
             self.last_orbit_target = None;
+            self.filtered_norad_dynamic_set = self.filtered_norad_set.clone();
+            self.dynamic_filter_ready = false;
         }
 
         if let Some(norad_id) = self.selected_object {
@@ -910,8 +988,9 @@ impl eframe::App for SpaceDbApp {
         egui::SidePanel::left("left_panel")
             .default_width(300.0)
             .show(ctx, |ui| {
+                let allowed_ids = self.current_allowed_set().clone();
                 self.search_panel
-                    .show(ui, &mut self.search_index, Some(&self.filtered_norad_set));
+                    .show(ui, &mut self.search_index, Some(&allowed_ids));
                 if self.search_panel.take_apply_filters() {
                     self.apply_filters();
                 }

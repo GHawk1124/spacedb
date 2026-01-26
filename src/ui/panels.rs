@@ -12,6 +12,8 @@ pub struct SearchPanel {
     pub filter: ObjectFilter,
     pub show_filters: bool,
     pub velocity_filter: VelocityFilter,
+    pub altitude_filter: AltitudeFilter,
+    pub tle_age_filter: TleAgeFilter,
     pub filters_dirty: bool,
     pub apply_filters_requested: bool,
 }
@@ -24,6 +26,42 @@ pub struct VelocityFilter {
     pub max_kms: f32,
     pub slow_percent: f32,
     pub fast_percent: f32,
+}
+
+/// Altitude filtering controls (km)
+#[derive(Debug, Clone)]
+pub struct AltitudeFilter {
+    pub enabled: bool,
+    pub min_km: f32,
+    pub max_km: f32,
+}
+
+impl Default for AltitudeFilter {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_km: 0.0,
+            max_km: 2000.0,
+        }
+    }
+}
+
+/// TLE age filtering controls (days)
+#[derive(Debug, Clone)]
+pub struct TleAgeFilter {
+    pub enabled: bool,
+    pub min_days: f32,
+    pub max_days: f32,
+}
+
+impl Default for TleAgeFilter {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_days: 0.0,
+            max_days: 30.0,
+        }
+    }
 }
 
 impl Default for VelocityFilter {
@@ -138,6 +176,42 @@ impl SearchPanel {
 
             ui.separator();
             if ui
+                .checkbox(&mut self.filter.mass_filter_enabled, "Mass filter (kg)")
+                .changed()
+            {
+                if self.filter.mass_filter_enabled && self.filter.mass_max_kg <= 0.0 {
+                    self.filter.mass_max_kg = 10000.0;
+                }
+                self.filters_dirty = true;
+                changed = true;
+            }
+            if self.filter.mass_filter_enabled {
+                let min_resp = ui.add(
+                    egui::Slider::new(&mut self.filter.mass_min_kg, 0.0..=1_000_000.0)
+                        .text("Min kg"),
+                );
+                let max_resp = ui.add(
+                    egui::Slider::new(&mut self.filter.mass_max_kg, 0.0..=1_000_000.0)
+                        .text("Max kg"),
+                );
+                if min_resp.changed() || max_resp.changed() {
+                    self.filters_dirty = true;
+                    changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut self.filter.include_unknown_mass,
+                        "Include unknown mass",
+                    )
+                    .changed()
+                {
+                    self.filters_dirty = true;
+                    changed = true;
+                }
+            }
+
+            ui.separator();
+            if ui
                 .checkbox(&mut self.velocity_filter.enabled, "Velocity filter (km/s)")
                 .changed()
             {
@@ -169,6 +243,79 @@ impl SearchPanel {
                     || slow_resp.changed()
                     || fast_resp.changed()
                 {
+                    self.filters_dirty = true;
+                    changed = true;
+                }
+            }
+
+            ui.separator();
+            if ui
+                .checkbox(&mut self.altitude_filter.enabled, "Altitude filter (km)")
+                .changed()
+            {
+                self.filters_dirty = true;
+                changed = true;
+            }
+            if self.altitude_filter.enabled {
+                ui.horizontal(|ui| {
+                    if ui.button("LEO").clicked() {
+                        self.altitude_filter.min_km = 0.0;
+                        self.altitude_filter.max_km = 2000.0;
+                        self.filters_dirty = true;
+                        changed = true;
+                    }
+                    if ui.button("MEO").clicked() {
+                        self.altitude_filter.min_km = 2000.0;
+                        self.altitude_filter.max_km = 35786.0;
+                        self.filters_dirty = true;
+                        changed = true;
+                    }
+                    if ui.button("GEO").clicked() {
+                        self.altitude_filter.min_km = 35000.0;
+                        self.altitude_filter.max_km = 37000.0;
+                        self.filters_dirty = true;
+                        changed = true;
+                    }
+                    if ui.button("HEO").clicked() {
+                        self.altitude_filter.min_km = 35786.0;
+                        self.altitude_filter.max_km = 100000.0;
+                        self.filters_dirty = true;
+                        changed = true;
+                    }
+                });
+
+                let min_resp = ui.add(
+                    egui::Slider::new(&mut self.altitude_filter.min_km, 0.0..=100000.0)
+                        .text("Min km"),
+                );
+                let max_resp = ui.add(
+                    egui::Slider::new(&mut self.altitude_filter.max_km, 0.0..=100000.0)
+                        .text("Max km"),
+                );
+                if min_resp.changed() || max_resp.changed() {
+                    self.filters_dirty = true;
+                    changed = true;
+                }
+            }
+
+            ui.separator();
+            if ui
+                .checkbox(&mut self.tle_age_filter.enabled, "TLE age filter (days)")
+                .changed()
+            {
+                self.filters_dirty = true;
+                changed = true;
+            }
+            if self.tle_age_filter.enabled {
+                let min_resp = ui.add(
+                    egui::Slider::new(&mut self.tle_age_filter.min_days, 0.0..=3650.0)
+                        .text("Min days"),
+                );
+                let max_resp = ui.add(
+                    egui::Slider::new(&mut self.tle_age_filter.max_days, 0.0..=3650.0)
+                        .text("Max days"),
+                );
+                if min_resp.changed() || max_resp.changed() {
                     self.filters_dirty = true;
                     changed = true;
                 }
