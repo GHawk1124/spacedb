@@ -101,6 +101,7 @@ pub struct SpaceDbApp {
     browser_panel: BrowserPanel,
     time_controls: TimeControls,
     selected_object: Option<u32>,
+    show_settings_window: bool,
 
     // Camera
     camera: Camera,
@@ -197,6 +198,7 @@ impl SpaceDbApp {
             browser_panel: BrowserPanel::default(),
             time_controls: TimeControls::default(),
             selected_object: None,
+            show_settings_window: false,
             camera: Camera::default(),
             camera_drag: None,
             satellite_instances: Arc::new(Vec::new()),
@@ -908,7 +910,11 @@ impl eframe::App for SpaceDbApp {
             ui.horizontal(|ui| {
                 ui.heading("SpaceDB");
                 ui.separator();
-                self.time_controls.show(ui, &self.propagator.format_time());
+                if ui.button("Settings").clicked() {
+                    self.show_settings_window = true;
+                }
+                ui.separator();
+                ui.label(format!("Time: {}", self.propagator.format_time()));
                 ui.separator();
                 let visible_count = if self.time_controls.show_satellites {
                     self.satellite_instances.len()
@@ -927,6 +933,15 @@ impl eframe::App for SpaceDbApp {
                 }
             });
         });
+
+        if self.show_settings_window {
+            egui::Window::new("Settings")
+                .open(&mut self.show_settings_window)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    self.time_controls.show(ui, &self.propagator.format_time());
+                });
+        }
 
         // Left panel with search and browser
         egui::SidePanel::left("left_panel")

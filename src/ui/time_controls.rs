@@ -43,21 +43,19 @@ impl Default for TimeControls {
 
 impl TimeControls {
     pub fn show(&mut self, ui: &mut Ui, current_time: &str) {
+        ui.label("Time Controls");
         ui.horizontal(|ui| {
-            // Play/Pause button
             let play_text = if self.playing { "⏸" } else { "▶" };
             if ui.button(play_text).clicked() {
                 self.playing = !self.playing;
             }
 
-            // Reverse button
             if ui.button("⏪").clicked() {
                 if self.speed > 0.0 {
                     self.speed = -self.speed;
                 }
             }
 
-            // Forward button
             if ui.button("⏩").clicked() {
                 if self.speed < 0.0 {
                     self.speed = -self.speed;
@@ -65,8 +63,6 @@ impl TimeControls {
             }
 
             ui.separator();
-
-            // Speed selector
             ui.label("Speed:");
             egui::ComboBox::from_id_salt("speed_select")
                 .selected_text(format_speed(self.speed))
@@ -80,28 +76,22 @@ impl TimeControls {
                         }
                     }
                 });
-
-            ui.separator();
-
-            // Current time display
-            ui.label(format!("Time: {}", current_time));
         });
 
-        // Orbit track settings
+        ui.label(format!("Current time: {}", current_time));
+        ui.separator();
+
+        ui.label("Satellites");
         ui.horizontal(|ui| {
-            ui.label("Orbit points:");
-            ui.add(egui::Slider::new(&mut self.orbit_points, 36..=720));
-            ui.separator();
-            ui.label("Satellites:");
             ui.checkbox(&mut self.show_satellites, "Show");
             ui.checkbox(&mut self.compute_satellites, "Compute");
-            ui.separator();
-            ui.label("SGP4 Hz:");
-            ui.add(egui::Slider::new(&mut self.sgp4_update_hz, 1.0..=20.0));
-            ui.separator();
-            ui.label("Max FPS:");
-            ui.add(egui::Slider::new(&mut self.max_fps, 20.0..=500.0));
         });
+        ui.add(egui::Slider::new(&mut self.orbit_points, 36..=720).text("Orbit points"));
+        ui.add(egui::Slider::new(&mut self.sgp4_update_hz, 1.0..=20.0).text("SGP4 Hz"));
+
+        ui.separator();
+        ui.label("Performance");
+        ui.add(egui::Slider::new(&mut self.max_fps, 20.0..=500.0).text("Max FPS"));
     }
 
     /// Get the time delta for this frame
