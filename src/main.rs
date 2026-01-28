@@ -12,7 +12,7 @@ mod ui;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anyhow::Result;
@@ -44,7 +44,6 @@ enum Command {
 #[derive(Debug)]
 enum Sgp4Command {
     SetIds(Vec<u32>),
-    Propagate { time: satkit::Instant },
     Stop,
 }
 
@@ -54,9 +53,23 @@ struct Sgp4Result {
     states: HashMap<u32, SatelliteState>,
 }
 
+/// Shared state for the latest propagation request.
+/// The worker reads this to get the most recent time, discarding stale requests.
+struct PropagationRequest {
+    time: satkit::Instant,
+    /// Incremented by the main thread each time a new request is made.
+    /// Used to skip processing if no new request has been made since last computation.
+    generation: u64,
+}
+
 struct Sgp4Worker {
-    sender: Sender<Sgp4Command>,
-    receiver: Receiver<Sgp4Result>,
+    /// Channel for sending commands (SetIds, Stop) to the worker
+    cmd_sender: Sender<Sgp4Command>,
+    /// Channel for receiving results from the worker
+    result_receiver: Receiver<Sgp4Result>,
+    /// Shared state for the latest propagation time request
+    /// The main thread writes to this, the worker reads from it
+    latest_request: Arc<Mutex<PropagationRequest>>,
     _handle: thread::JoinHandle<()>,
 }
 
@@ -65,38 +78,74 @@ impl Sgp4Worker {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Sgp4Command>();
         let (result_tx, result_rx) = mpsc::channel::<Sgp4Result>();
 
+        let initial_time = propagator.current_time().clone();
+        let latest_request = Arc::new(Mutex::new(PropagationRequest {
+            time: initial_time,
+            generation: 0,
+        }));
+        let worker_request = Arc::clone(&latest_request);
+
         let handle = thread::spawn(move || {
             let mut current_ids: Vec<u32> = Vec::new();
+            let mut last_processed_generation: u64 = 0;
 
-            while let Ok(command) = cmd_rx.recv() {
-                match command {
-                    Sgp4Command::SetIds(ids) => {
+            loop {
+                // Check for control commands (non-blocking)
+                match cmd_rx.try_recv() {
+                    Ok(Sgp4Command::SetIds(ids)) => {
                         current_ids = ids;
                     }
-                    Sgp4Command::Propagate { time } => {
-                        if current_ids.is_empty() {
-                            let _ = result_tx.send(Sgp4Result {
-                                time,
-                                states: HashMap::new(),
-                            });
-                            continue;
-                        }
+                    Ok(Sgp4Command::Stop) | Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
 
+                // Check if there's a new propagation request
+                let should_propagate = {
+                    let request = worker_request.lock().unwrap();
+                    if request.generation > last_processed_generation {
+                        // Clone the time to avoid holding the lock during propagation
+                        Some((request.time.clone(), request.generation))
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some((time, generation)) = should_propagate {
+                    if current_ids.is_empty() {
+                        let _ = result_tx.send(Sgp4Result {
+                            time,
+                            states: HashMap::new(),
+                        });
+                        last_processed_generation = generation;
+                    } else {
                         propagator.set_time(time);
                         let states = propagator.propagate_subset(&current_ids);
                         if result_tx.send(Sgp4Result { time, states }).is_err() {
                             break;
                         }
+                        last_processed_generation = generation;
                     }
-                    Sgp4Command::Stop => break,
+                } else {
+                    // No new request, sleep a bit to avoid busy-waiting
+                    thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
         });
 
         Self {
-            sender: cmd_tx,
-            receiver: result_rx,
+            cmd_sender: cmd_tx,
+            result_receiver: result_rx,
+            latest_request,
             _handle: handle,
+        }
+    }
+
+    /// Request propagation at the given time. This updates the shared request state,
+    /// causing the worker to process this time (cancelling any pending stale request).
+    fn request_propagation(&self, time: satkit::Instant) {
+        if let Ok(mut request) = self.latest_request.lock() {
+            request.time = time;
+            request.generation += 1;
         }
     }
 }
@@ -262,7 +311,7 @@ impl SpaceDbApp {
             self.sgp4_worker = Some(Sgp4Worker::new(self.propagator.clone_for_worker()));
             if let Some(worker) = &self.sgp4_worker {
                 let _ = worker
-                    .sender
+                    .cmd_sender
                     .send(Sgp4Command::SetIds(self.filtered_norad_ids.clone()));
             }
         }
@@ -290,11 +339,9 @@ impl SpaceDbApp {
 
         if let Some(worker) = &self.sgp4_worker {
             let _ = worker
-                .sender
+                .cmd_sender
                 .send(Sgp4Command::SetIds(self.filtered_norad_ids.clone()));
-            let _ = worker.sender.send(Sgp4Command::Propagate {
-                time: *self.propagator.current_time(),
-            });
+            worker.request_propagation(*self.propagator.current_time());
         }
 
         if let Some(selected) = self.selected_object {
@@ -344,25 +391,27 @@ impl SpaceDbApp {
 
         self.satellite_update_accumulator += frame_time.max(0.0);
 
+        // Request propagation at the current time (updates shared state, worker always uses latest)
         if self.satellite_update_accumulator >= update_interval {
             let time = *self.propagator.current_time();
             if let Some(worker) = &self.sgp4_worker {
-                let _ = worker.sender.send(Sgp4Command::Propagate { time });
+                worker.request_propagation(time);
             }
             self.satellite_update_accumulator = 0.0;
         }
 
-        let mut latest_result = None;
+        // Process the most recent result from the worker
+        // Drain all pending results and keep only the newest one
         if let Some(worker) = &self.sgp4_worker {
-            while let Ok(result) = worker.receiver.try_recv() {
+            let mut latest_result: Option<Sgp4Result> = None;
+            while let Ok(result) = worker.result_receiver.try_recv() {
                 latest_result = Some(result);
             }
-        }
-
-        if let Some(result) = latest_result {
-            self.satellite_states = result.states;
-            self.last_states_time = Some(result.time);
-            self.velocity_thresholds_dirty = true;
+            if let Some(result) = latest_result {
+                self.satellite_states = result.states;
+                self.last_states_time = Some(result.time);
+                self.velocity_thresholds_dirty = true;
+            }
         }
     }
 
@@ -1138,7 +1187,7 @@ impl eframe::App for SpaceDbApp {
 impl Drop for SpaceDbApp {
     fn drop(&mut self) {
         if let Some(worker) = &self.sgp4_worker {
-            let _ = worker.sender.send(Sgp4Command::Stop);
+            let _ = worker.cmd_sender.send(Sgp4Command::Stop);
         }
     }
 }
