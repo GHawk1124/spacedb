@@ -2,6 +2,10 @@
 
 use egui::Ui;
 
+use crate::propagation::hifi::{
+    AtmosphereModelType, GravityModelChoice, HiFiSettings, PropagatorType,
+};
+
 /// Time control state
 #[derive(Clone)]
 pub struct TimeControls {
@@ -81,7 +85,7 @@ impl TimeControls {
         });
     }
 
-    pub fn show_settings(&mut self, ui: &mut Ui) {
+    pub fn show_settings(&mut self, ui: &mut Ui, hifi_settings: &mut HiFiSettings) {
         ui.label("Satellites");
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.show_satellites, "Show");
@@ -93,6 +97,80 @@ impl TimeControls {
         ui.separator();
         ui.label("Performance");
         ui.add(egui::Slider::new(&mut self.max_fps, 20.0..=500.0).text("Max FPS"));
+
+        ui.separator();
+        ui.label("Propagation Method");
+
+        ui.horizontal(|ui| {
+            ui.label("Propagator");
+            egui::ComboBox::from_id_salt("propagator_type")
+                .selected_text(hifi_settings.propagator.name())
+                .show_ui(ui, |ui| {
+                    for option in PropagatorType::all() {
+                        let response = ui.selectable_value(
+                            &mut hifi_settings.propagator,
+                            *option,
+                            option.name(),
+                        );
+                        if response.clicked() {
+                            hifi_settings.sync_integrator();
+                        }
+                        // Show description on hover
+                        response.on_hover_text(option.description());
+                    }
+                });
+        });
+
+        // Show high-fidelity settings only when a high-fidelity propagator is selected
+        if hifi_settings.propagator.is_high_fidelity() {
+            ui.separator();
+            ui.label("High-Fidelity Propagation Settings");
+
+            ui.horizontal(|ui| {
+                ui.label("Atmosphere");
+                egui::ComboBox::from_id_salt("hifi_atmosphere")
+                    .selected_text(hifi_settings.atmosphere.name())
+                    .show_ui(ui, |ui| {
+                        for option in [
+                            AtmosphereModelType::Nrlmsise00,
+                            AtmosphereModelType::Jb2008,
+                            AtmosphereModelType::HarrisPriester,
+                            AtmosphereModelType::Exponential,
+                        ] {
+                            ui.selectable_value(&mut hifi_settings.atmosphere, option, option.name());
+                        }
+                    });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Gravity");
+                egui::ComboBox::from_id_salt("hifi_gravity")
+                    .selected_text(hifi_settings.gravity.name())
+                    .show_ui(ui, |ui| {
+                        for option in GravityModelChoice::all() {
+                            ui.selectable_value(&mut hifi_settings.gravity, *option, option.name());
+                        }
+                    });
+            });
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut hifi_settings.include_srp, "SRP");
+                ui.checkbox(&mut hifi_settings.include_third_body, "Sun/Moon");
+            });
+
+            ui.add(
+                egui::Slider::new(&mut hifi_settings.config.step_size, 5.0..=600.0).text("Step (s)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut hifi_settings.config.tolerance, 1e-12..=1e-6)
+                    .logarithmic(true)
+                    .text("Tolerance"),
+            );
+            ui.add(
+                egui::Slider::new(&mut hifi_settings.decay_horizon_days, 30.0..=3650.0)
+                    .text("Decay horizon (days)"),
+            );
+        }
     }
 
     fn set_speed(&mut self, speed: f64) {

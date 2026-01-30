@@ -79,6 +79,26 @@ impl DiscosData {
         let d = self.depth.unwrap_or_else(|| self.diameter.unwrap_or(w));
         (w, h, d)
     }
+
+    /// Estimate a representative cross-sectional area in m²
+    pub fn cross_section_m2(&self) -> Option<f64> {
+        if let Some(area) = self.x_sect_avg {
+            return Some(area);
+        }
+        if let Some(area) = self.x_sect_max {
+            return Some(area);
+        }
+        if let Some(area) = self.x_sect_min {
+            return Some(area);
+        }
+
+        let width = self.width.or(self.diameter);
+        let height = self.height.or(self.diameter);
+        match (width, height) {
+            (Some(w), Some(h)) => Some(w * h),
+            _ => None,
+        }
+    }
 }
 
 impl SpaceObject {

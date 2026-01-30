@@ -21,6 +21,7 @@ use eframe::egui;
 use glam::Vec3;
 
 use data::{load_complete_database, DatabaseStats, ObjectFilter, SearchIndex, SpaceObjectDatabase};
+use propagation::hifi::{self, HiFiSettings, PropagationError, SpacecraftState};
 use propagation::{generate_orbit_track_from_tle, Propagator, SatelliteState, EARTH_RADIUS_KM};
 use renderer::{
     altitude_to_color, Camera, OrbitVertex, SatelliteInstance, SceneCallback, SceneRenderData,
@@ -51,6 +52,22 @@ enum Sgp4Command {
 struct Sgp4Result {
     time: satkit::Instant,
     states: HashMap<u32, SatelliteState>,
+}
+
+#[derive(Debug, Clone)]
+struct HiFiDecayResult {
+    norad_id: u32,
+    start_epoch: satkit::Instant,
+    horizon_days: f64,
+    reentry_epoch: Option<satkit::Instant>,
+    reentry_altitude_km: Option<f64>,
+    message: Option<String>,
+    elapsed_seconds: f64,
+}
+
+struct HiFiDecayJob {
+    norad_id: u32,
+    receiver: Receiver<HiFiDecayResult>,
 }
 
 /// Shared state for the latest propagation request.
@@ -167,6 +184,11 @@ pub struct SpaceDbApp {
     selected_object: Option<u32>,
     show_settings_window: bool,
 
+    // High-fidelity propagation settings and results
+    hifi_settings: HiFiSettings,
+    hifi_decay_job: Option<HiFiDecayJob>,
+    hifi_decay_result: Option<HiFiDecayResult>,
+
     // Camera
     camera: Camera,
     camera_drag: Option<egui::Pos2>,
@@ -277,6 +299,9 @@ impl SpaceDbApp {
             time_controls: TimeControls::default(),
             selected_object: None,
             show_settings_window: false,
+            hifi_settings: HiFiSettings::default(),
+            hifi_decay_job: None,
+            hifi_decay_result: None,
             camera: Camera::default(),
             camera_drag: None,
             satellite_instances: Arc::new(Vec::new()),
@@ -315,6 +340,137 @@ impl SpaceDbApp {
                     .send(Sgp4Command::SetIds(self.filtered_norad_ids.clone()));
             }
         }
+    }
+
+    fn poll_hifi_decay_job(&mut self) {
+        if let Some(job) = &self.hifi_decay_job {
+            match job.receiver.try_recv() {
+                Ok(result) => {
+                    self.hifi_decay_result = Some(result);
+                    self.hifi_decay_job = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.hifi_decay_job = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    fn build_hifi_state(&self, norad_id: u32) -> Result<SpacecraftState, String> {
+        let norad_str = norad_id.to_string();
+        let obj = self
+            .database
+            .objects
+            .get(&norad_str)
+            .ok_or_else(|| "Object not found".to_string())?;
+        let tle = self
+            .propagator
+            .get_tle(norad_id)
+            .ok_or_else(|| "No TLE available".to_string())?;
+        let epoch = *self.propagator.current_time();
+        let orbital = hifi::orbital_state_from_tle(tle, &epoch)
+            .ok_or_else(|| "Failed to build GCRF state from TLE".to_string())?;
+
+        let (mass, area) = obj
+            .discos
+            .as_ref()
+            .map(|d| (d.mass, d.cross_section_m2()))
+            .unwrap_or((None, None));
+
+        Ok(SpacecraftState::from_discos(orbital, mass, area))
+    }
+
+    fn start_hifi_decay_prediction(&mut self, norad_id: u32) {
+        if self.hifi_decay_job.is_some() {
+            return;
+        }
+
+        let state = match self.build_hifi_state(norad_id) {
+            Ok(state) => state,
+            Err(message) => {
+                self.hifi_decay_result = Some(HiFiDecayResult {
+                    norad_id,
+                    start_epoch: *self.propagator.current_time(),
+                    horizon_days: self.hifi_settings.decay_horizon_days,
+                    reentry_epoch: None,
+                    reentry_altitude_km: None,
+                    message: Some(message),
+                    elapsed_seconds: 0.0,
+                });
+                return;
+            }
+        };
+
+        let settings = self.hifi_settings.clone();
+        let horizon_days = settings.decay_horizon_days;
+        let start_epoch = state.orbital.epoch;
+        let target_epoch = start_epoch + satkit::Duration::from_days(horizon_days);
+
+        let (tx, rx) = mpsc::channel();
+        self.hifi_decay_job = Some(HiFiDecayJob {
+            norad_id,
+            receiver: rx,
+        });
+        self.hifi_decay_result = None;
+
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            
+            // Check if we have a valid high-fidelity propagator
+            let propagator = match settings.build_propagator() {
+                Some(p) => p,
+                None => {
+                    // SGP4 was selected, can't do decay prediction
+                    let outcome = HiFiDecayResult {
+                        norad_id,
+                        start_epoch,
+                        horizon_days,
+                        reentry_epoch: None,
+                        reentry_altitude_km: None,
+                        message: Some(
+                            "Decay prediction requires a high-fidelity propagator (Native RK4 or Satkit RK98). \
+                             SGP4 is an analytic propagator and cannot predict orbital decay.".to_string()
+                        ),
+                        elapsed_seconds: 0.0,
+                    };
+                    let _ = tx.send(outcome);
+                    return;
+                }
+            };
+            
+            let outcome = match propagator.propagate(state, target_epoch) {
+                Ok(_) => HiFiDecayResult {
+                    norad_id,
+                    start_epoch,
+                    horizon_days,
+                    reentry_epoch: None,
+                    reentry_altitude_km: None,
+                    message: Some("No reentry within horizon".to_string()),
+                    elapsed_seconds: started.elapsed().as_secs_f64(),
+                },
+                Err(PropagationError::Reentry { altitude_km, epoch }) => HiFiDecayResult {
+                    norad_id,
+                    start_epoch,
+                    horizon_days,
+                    reentry_epoch: Some(epoch),
+                    reentry_altitude_km: Some(altitude_km),
+                    message: None,
+                    elapsed_seconds: started.elapsed().as_secs_f64(),
+                },
+                Err(err) => HiFiDecayResult {
+                    norad_id,
+                    start_epoch,
+                    horizon_days,
+                    reentry_epoch: None,
+                    reentry_altitude_km: None,
+                    message: Some(err.to_string()),
+                    elapsed_seconds: started.elapsed().as_secs_f64(),
+                },
+            };
+
+            let _ = tx.send(outcome);
+        });
     }
 
     fn apply_filters(&mut self) {
@@ -1001,6 +1157,8 @@ impl eframe::App for SpaceDbApp {
         self.last_frame_time = now;
         self.last_frame_delta = frame_time;
 
+        self.poll_hifi_decay_job();
+
         // Advance simulation time
         let time_delta = self.time_controls.time_delta(frame_time);
         self.propagator.advance_time(time_delta);
@@ -1069,7 +1227,8 @@ impl eframe::App for SpaceDbApp {
                 .open(&mut self.show_settings_window)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    self.time_controls.show_settings(ui);
+                    self.time_controls
+                        .show_settings(ui, &mut self.hifi_settings);
                 });
         }
 
@@ -1153,6 +1312,58 @@ impl eframe::App for SpaceDbApp {
                                     ));
                                     ui.end_row();
                                 });
+                        }
+
+                        ui.separator();
+                        ui.heading("Decay Prediction");
+                        ui.label(format!(
+                            "Propagator: {}",
+                            self.hifi_settings.propagator.name()
+                        ));
+                        ui.label(format!(
+                            "Atmosphere: {}",
+                            self.hifi_settings.atmosphere.name()
+                        ));
+                        ui.label(format!("Gravity: {}", self.hifi_settings.gravity.name()));
+                        ui.label(format!(
+                            "Horizon: {:.0} days",
+                            self.hifi_settings.decay_horizon_days
+                        ));
+
+                        let job_active = self.hifi_decay_job.is_some();
+                        let running_for_selected = self
+                            .hifi_decay_job
+                            .as_ref()
+                            .map(|job| job.norad_id == norad_id)
+                            .unwrap_or(false);
+                        if job_active {
+                            if running_for_selected {
+                                ui.label("Prediction running...");
+                            } else {
+                                ui.label("Prediction running for another object");
+                            }
+                        } else if ui.button("Predict decay (HiFi)").clicked() {
+                            self.start_hifi_decay_prediction(norad_id);
+                        }
+
+                        if let Some(result) = &self.hifi_decay_result {
+                            if result.norad_id == norad_id {
+                                if let Some(epoch) = result.reentry_epoch {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(200, 180, 100),
+                                        format!("Predicted reentry: {}", epoch),
+                                    );
+                                    if let Some(alt_km) = result.reentry_altitude_km {
+                                        ui.label(format!("Altitude: {:.1} km", alt_km));
+                                    }
+                                } else if let Some(message) = &result.message {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(150, 150, 150),
+                                        message,
+                                    );
+                                }
+                                ui.label(format!("Elapsed: {:.2}s", result.elapsed_seconds));
+                            }
                         }
 
                         ui.separator();
