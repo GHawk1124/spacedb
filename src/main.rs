@@ -40,6 +40,8 @@ struct Cli {
 enum Command {
     /// Run collision analysis without rendering
     Collisions(analysis::CollisionArgs),
+    /// Run decay prediction analysis without rendering
+    Decay(analysis::DecayArgs),
 }
 
 #[derive(Debug)]
@@ -1435,6 +1437,7 @@ fn main() -> Result<()> {
     if let Some(command) = cli.command {
         match command {
             Command::Collisions(args) => return analysis::run_collision_scan(args),
+            Command::Decay(args) => return analysis::run_decay_prediction(args),
         }
     }
 
