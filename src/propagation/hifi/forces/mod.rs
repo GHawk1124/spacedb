@@ -15,8 +15,8 @@
 //!
 //! - **EarthGravity**: Central body gravity with optional J2-Jn perturbations
 //! - **AtmosphericDrag**: Drag using configurable atmosphere models
-//! - **SolarRadiationPressure**: SRP (placeholder)
-//! - **ThirdBody**: Sun/Moon gravitational perturbations (placeholder)
+//! - **SolarRadiationPressure**: SRP with shadow modeling
+//! - **ThirdBody**: Sun/Moon gravitational perturbations with configurable ephemeris
 
 mod drag;
 mod gravity;
@@ -26,7 +26,7 @@ mod third_body;
 pub use drag::AtmosphericDrag;
 pub use gravity::{EarthGravity, GravityModel};
 pub use srp::SolarRadiationPressure;
-pub use third_body::ThirdBody;
+pub use third_body::{EphemerisType, ThirdBody};
 
 use crate::propagation::hifi::state::SpacecraftState;
 use nalgebra::Vector3;

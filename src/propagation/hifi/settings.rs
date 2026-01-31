@@ -2,7 +2,8 @@
 
 use super::atmosphere::AtmosphereModelType;
 use super::forces::{
-    AtmosphericDrag, CompositeForce, EarthGravity, GravityModel, SolarRadiationPressure, ThirdBody,
+    AtmosphericDrag, CompositeForce, EarthGravity, EphemerisType, GravityModel,
+    SolarRadiationPressure, ThirdBody,
 };
 use super::hifi_propagator::PropagatorConfig;
 use super::integrator::{Integrator, NativeRK4, SatkitRK98};
@@ -216,6 +217,8 @@ pub struct HiFiSettings {
     pub gravity: GravityModelChoice,
     pub include_srp: bool,
     pub include_third_body: bool,
+    /// Ephemeris type for third-body calculations
+    pub ephemeris: EphemerisType,
     pub config: PropagatorConfig,
     pub decay_horizon_days: f64,
 }
@@ -229,6 +232,7 @@ impl Default for HiFiSettings {
             gravity: GravityModelChoice::FullField20,
             include_srp: true,
             include_third_body: true,
+            ephemeris: EphemerisType::LowPrecision,
             config: PropagatorConfig::high_precision(),
             decay_horizon_days: 3650.0,
         }
@@ -246,7 +250,9 @@ impl HiFiSettings {
         }
 
         if self.include_third_body {
-            forces.add(Box::new(ThirdBody::sun_and_moon()));
+            forces.add(Box::new(ThirdBody::sun_and_moon_with_ephemeris(
+                self.ephemeris,
+            )));
         }
 
         forces
@@ -255,7 +261,11 @@ impl HiFiSettings {
     pub fn build_propagator(&self) -> Option<HiFiPropagator> {
         let integrator = self.propagator.create_integrator(self)?;
         let forces = self.build_forces();
-        Some(HiFiPropagator::with_config(integrator, forces, self.config.clone()))
+        Some(HiFiPropagator::with_config(
+            integrator,
+            forces,
+            self.config.clone(),
+        ))
     }
 
     /// Sync the legacy integrator field with the new propagator field

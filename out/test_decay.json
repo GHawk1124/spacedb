@@ -1,0 +1,31 @@
+{
+  "generated_at": "2026-01-30T23:29:09.179264+00:00",
+  "start_time_utc": "2026-01-30T23:26:02.753933Z",
+  "horizon_days": 365.0,
+  "reentry_altitude_km": 70.0,
+  "propagator": "Native RK4 (Adaptive)",
+  "atmosphere": "Harris-Priester",
+  "gravity": "J2",
+  "total_objects": 1,
+  "decayed_count": 1,
+  "survived_count": 0,
+  "error_count": 0,
+  "predictions": [
+    {
+      "norad_id": 25544,
+      "name": "ISS (ZARYA)",
+      "object_type": "PAYLOAD",
+      "country": "CIS",
+      "launch_date": "1998-11-20",
+      "tle_epoch": "2026-01-22T22:45:34.404768",
+      "tle_age_days": 8.028105893113427,
+      "initial_altitude_km": 425.84758839671315,
+      "decay_epoch": "2026-07-03T13:15:49.654207Z",
+      "decay_altitude_km": 69.95193710888643,
+      "days_to_decay": 153.5762372716898,
+      "status": "decayed",
+      "error_message": null,
+      "propagation_seconds": 186.4209817
+    }
+  ]
+}

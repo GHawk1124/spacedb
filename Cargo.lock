@@ -5054,6 +5054,7 @@ dependencies = [
  "nucleo",
  "nyx-space",
  "parking_lot",
+ "rayon",
  "satkit",
  "serde",
  "serde_json",

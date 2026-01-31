@@ -1,16 +1,38 @@
-//! Third-body gravitational perturbations (placeholder)
+//! Third-body gravitational perturbations
 //!
 //! Models gravitational effects from the Sun and Moon.
 //!
-//! # Status
+//! # Ephemeris Options
 //!
-//! This is a placeholder with a basic implementation using
-//! satkit's low-precision ephemeris.
+//! - **LowPrecision (lpephem)**: Fast analytical approximations, no external data needed
+//! - **HighPrecision (jplephem)**: JPL DE440 ephemeris, ~100MB download, sub-arcsecond accuracy
 
 use super::ForceModel;
 use crate::propagation::hifi::state::SpacecraftState;
 use nalgebra::Vector3;
-use satkit::lpephem;
+use satkit::{jplephem, lpephem, SolarSystem};
+
+/// Ephemeris precision level for third-body calculations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EphemerisType {
+    /// Low-precision analytical ephemeris (fast, no external data)
+    /// Accuracy: ~0.1° for Sun, ~0.3° for Moon
+    #[default]
+    LowPrecision,
+
+    /// High-precision JPL DE440 ephemeris (requires ~100MB download)
+    /// Accuracy: sub-arcsecond
+    HighPrecision,
+}
+
+impl EphemerisType {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::LowPrecision => "Low-Precision (lpephem)",
+            Self::HighPrecision => "High-Precision (jplephem/DE440)",
+        }
+    }
+}
 
 /// Third-body gravitational perturbation model
 pub struct ThirdBody {
@@ -22,6 +44,9 @@ pub struct ThirdBody {
 
     /// Whether enabled
     enabled: bool,
+
+    /// Ephemeris precision level
+    ephemeris: EphemerisType,
 }
 
 impl Default for ThirdBody {
@@ -31,12 +56,23 @@ impl Default for ThirdBody {
 }
 
 impl ThirdBody {
-    /// Create a model with both Sun and Moon
+    /// Create a model with both Sun and Moon (low-precision ephemeris)
     pub fn sun_and_moon() -> Self {
         Self {
             include_sun: true,
             include_moon: true,
             enabled: true,
+            ephemeris: EphemerisType::LowPrecision,
+        }
+    }
+
+    /// Create a model with both Sun and Moon using specified ephemeris
+    pub fn sun_and_moon_with_ephemeris(ephemeris: EphemerisType) -> Self {
+        Self {
+            include_sun: true,
+            include_moon: true,
+            enabled: true,
+            ephemeris,
         }
     }
 
@@ -46,6 +82,7 @@ impl ThirdBody {
             include_sun: true,
             include_moon: false,
             enabled: true,
+            ephemeris: EphemerisType::LowPrecision,
         }
     }
 
@@ -55,6 +92,7 @@ impl ThirdBody {
             include_sun: false,
             include_moon: true,
             enabled: true,
+            ephemeris: EphemerisType::LowPrecision,
         }
     }
 
@@ -64,6 +102,64 @@ impl ThirdBody {
             include_sun: false,
             include_moon: false,
             enabled: false,
+            ephemeris: EphemerisType::LowPrecision,
+        }
+    }
+
+    /// Set ephemeris type
+    pub fn with_ephemeris(mut self, ephemeris: EphemerisType) -> Self {
+        self.ephemeris = ephemeris;
+        self
+    }
+
+    /// Get current ephemeris type
+    pub fn ephemeris_type(&self) -> EphemerisType {
+        self.ephemeris
+    }
+
+    /// Get Sun position in GCRF using configured ephemeris
+    fn sun_position(&self, epoch: &satkit::Instant) -> Vector3<f64> {
+        match self.ephemeris {
+            EphemerisType::LowPrecision => {
+                let sun_gcrf = lpephem::sun::pos_gcrf(epoch);
+                Vector3::new(sun_gcrf[0], sun_gcrf[1], sun_gcrf[2])
+            }
+            EphemerisType::HighPrecision => {
+                match jplephem::geocentric_pos(SolarSystem::Sun, epoch) {
+                    Ok(pos) => Vector3::new(pos[0], pos[1], pos[2]),
+                    Err(e) => {
+                        log::warn!(
+                            "JPL ephemeris failed for Sun, falling back to lpephem: {}",
+                            e
+                        );
+                        let sun_gcrf = lpephem::sun::pos_gcrf(epoch);
+                        Vector3::new(sun_gcrf[0], sun_gcrf[1], sun_gcrf[2])
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get Moon position in GCRF using configured ephemeris
+    fn moon_position(&self, epoch: &satkit::Instant) -> Vector3<f64> {
+        match self.ephemeris {
+            EphemerisType::LowPrecision => {
+                let moon_gcrf = lpephem::moon::pos_gcrf(epoch);
+                Vector3::new(moon_gcrf[0], moon_gcrf[1], moon_gcrf[2])
+            }
+            EphemerisType::HighPrecision => {
+                match jplephem::geocentric_pos(SolarSystem::Moon, epoch) {
+                    Ok(pos) => Vector3::new(pos[0], pos[1], pos[2]),
+                    Err(e) => {
+                        log::warn!(
+                            "JPL ephemeris failed for Moon, falling back to lpephem: {}",
+                            e
+                        );
+                        let moon_gcrf = lpephem::moon::pos_gcrf(epoch);
+                        Vector3::new(moon_gcrf[0], moon_gcrf[1], moon_gcrf[2])
+                    }
+                }
+            }
         }
     }
 
@@ -111,8 +207,7 @@ impl ForceModel for ThirdBody {
 
         // Sun perturbation
         if self.include_sun {
-            let sun_gcrf = lpephem::sun::pos_gcrf(&state.orbital.epoch);
-            let sun_pos = Vector3::new(sun_gcrf[0], sun_gcrf[1], sun_gcrf[2]);
+            let sun_pos = self.sun_position(&state.orbital.epoch);
 
             // Sun's gravitational parameter (m³/s²)
             const MU_SUN: f64 = 1.32712440018e20;
@@ -122,8 +217,7 @@ impl ForceModel for ThirdBody {
 
         // Moon perturbation
         if self.include_moon {
-            let moon_gcrf = lpephem::moon::pos_gcrf(&state.orbital.epoch);
-            let moon_pos = Vector3::new(moon_gcrf[0], moon_gcrf[1], moon_gcrf[2]);
+            let moon_pos = self.moon_position(&state.orbital.epoch);
 
             // Moon's gravitational parameter (m³/s²)
             const MU_MOON: f64 = 4.902800066e12;
@@ -144,7 +238,10 @@ impl ForceModel for ThirdBody {
     }
 
     fn description(&self) -> &'static str {
-        "Gravitational perturbations from Sun and Moon"
+        match self.ephemeris {
+            EphemerisType::LowPrecision => "Sun/Moon perturbations (low-precision ephemeris)",
+            EphemerisType::HighPrecision => "Sun/Moon perturbations (JPL DE440 ephemeris)",
+        }
     }
 
     fn enabled(&self) -> bool {

@@ -1,0 +1,13 @@
+{
+  "generated_at": "2026-01-31T03:37:57.316061900+00:00",
+  "start_time_utc": "2026-01-31T03:37:57.170135Z",
+  "hours": 1.0,
+  "step_seconds": 60,
+  "distance_km": 10.0,
+  "propagator": "Native RK4",
+  "atmosphere": "Harris-Priester",
+  "gravity": "J2",
+  "total_objects": 10,
+  "total_pairs": 0,
+  "events": []
+}
