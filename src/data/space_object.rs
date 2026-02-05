@@ -3,6 +3,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+const EARTH_RADIUS_KM: f64 = 6371.0;
+const MU_EARTH_KM3_S2: f64 = 398600.4418;
+// Perigee below this altitude is treated as terminal reentry.
+const REENTRY_PERIGEE_KM: f64 = 80.0;
+const SECONDS_PER_DAY: f64 = 86_400.0;
+
 /// Root structure of the space_objects.json file
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpaceObjectDatabase {
@@ -118,4 +124,54 @@ impl SpaceObject {
     pub fn is_decayed(&self) -> bool {
         self.decay_date.is_some()
     }
+
+    /// Estimate perigee/apogee from TLE (km above Earth's surface)
+    pub fn perigee_apogee_km(&self) -> Option<(f64, f64)> {
+        let tle = self.tle.as_ref()?;
+        let satkit_tle = satkit::TLE::load_2line(&tle.line1, &tle.line2).ok()?;
+        tle_perigee_apogee_km(&satkit_tle)
+    }
+
+    /// Returns perigee/apogee if the TLE indicates imminent reentry.
+    pub fn reentry_hint_km(&self) -> Option<(f64, f64)> {
+        let (perigee_km, apogee_km) = self.perigee_apogee_km()?;
+        if perigee_km < REENTRY_PERIGEE_KM {
+            Some((perigee_km, apogee_km))
+        } else {
+            None
+        }
+    }
+
+    /// Check if the object is likely in a terminal reentry trajectory.
+    pub fn is_reentry_imminent(&self) -> bool {
+        self.decay_date.is_none() && self.reentry_hint_km().is_some()
+    }
+
+    /// Check if the object is decayed or in a terminal reentry trajectory.
+    pub fn is_decayed_or_reentering(&self) -> bool {
+        self.is_decayed() || self.is_reentry_imminent()
+    }
+}
+
+fn tle_perigee_apogee_km(tle: &satkit::TLE) -> Option<(f64, f64)> {
+    if !tle.mean_motion.is_finite() || !tle.eccen.is_finite() {
+        return None;
+    }
+    if tle.mean_motion <= 0.0 || !(0.0..1.0).contains(&tle.eccen) {
+        return None;
+    }
+
+    let n_rad_s = tle.mean_motion * (2.0 * std::f64::consts::PI) / SECONDS_PER_DAY;
+    if n_rad_s <= 0.0 {
+        return None;
+    }
+
+    let a_km = (MU_EARTH_KM3_S2 / (n_rad_s * n_rad_s)).cbrt();
+    if !a_km.is_finite() {
+        return None;
+    }
+
+    let perigee_km = a_km * (1.0 - tle.eccen) - EARTH_RADIUS_KM;
+    let apogee_km = a_km * (1.0 + tle.eccen) - EARTH_RADIUS_KM;
+    Some((perigee_km, apogee_km))
 }

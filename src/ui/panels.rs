@@ -123,7 +123,10 @@ impl SearchPanel {
                 changed = true;
             }
             if ui
-                .checkbox(&mut self.filter.exclude_decayed, "Exclude decayed")
+                .checkbox(
+                    &mut self.filter.exclude_decayed,
+                    "Exclude decayed / reentering",
+                )
                 .changed()
             {
                 self.filters_dirty = true;
@@ -468,6 +471,13 @@ impl DetailPanel {
                 if let Some(decay) = &obj.decay_date {
                     ui.label("Decay:");
                     ui.colored_label(Color32::from_rgb(200, 100, 100), decay);
+                    ui.end_row();
+                } else if let Some((perigee_km, apogee_km)) = obj.reentry_hint_km() {
+                    ui.label("Reentry:");
+                    ui.colored_label(
+                        Color32::from_rgb(200, 140, 100),
+                        format!("Perigee {:.0} km (apogee {:.0} km)", perigee_km, apogee_km),
+                    );
                     ui.end_row();
                 }
 

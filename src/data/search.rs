@@ -236,8 +236,8 @@ impl ObjectFilter {
             return false;
         }
 
-        // Decayed filter
-        if self.exclude_decayed && obj.is_decayed() {
+        // Decayed filter (includes imminent reentry)
+        if self.exclude_decayed && obj.is_decayed_or_reentering() {
             return false;
         }
 
