@@ -42,9 +42,16 @@ mod hifi_propagator;
 mod settings;
 
 // Re-export main types
-pub use atmosphere::{AtmosphereDensity, AtmosphereModel, AtmosphereModelType};
+#[allow(unused_imports)]
+pub use atmosphere::{
+    AtmosphereDensity, AtmosphereModel, AtmosphereModelType, LookupAccuracy, LookupAtmosphere,
+    LookupConfig,
+};
+#[allow(unused_imports)]
 pub use forces::{CompositeForce, ForceModel};
+#[allow(unused_imports)]
 pub use hifi_propagator::{HiFiPropagator, PropagationError, PropagationResult, PropagatorConfig};
+#[allow(unused_imports)]
 pub use integrator::{Integrator, NativeRK4, SatkitRK98};
 pub use settings::{GravityModelChoice, HiFiSettings, IntegratorType, PropagatorType};
 pub use state::{OrbitalState, SpacecraftState};

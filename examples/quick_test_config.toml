@@ -1,0 +1,60 @@
+# Quick Test Configuration - Minimal Settings
+
+[metadata]
+name = "Quick Test"
+version = "1.0"
+
+[filter]
+object_types = []  # all types
+countries = []
+has_tle_only = true
+exclude_decayed = true
+altitude_filter_enabled = true
+altitude_min_km = 200.0
+altitude_max_km = 2000.0
+
+[decay]
+# Shorter horizon for faster testing
+propagator = "native-rk4"
+atmosphere = "exponential"  # faster than nrlmsise00
+gravity = "j2"
+horizon_days = 7.0  # 1 week for quick testing
+include_srp = false
+include_third_body = false
+
+[collision]
+propagator = "sgp4"
+hours = 24.0  # 1 day instead of 1 week
+distance_threshold_km = 10.0
+
+[scoring.weights]
+mass_size = 0.25
+collision_risk = 0.35
+decay_timeline = 0.25
+object_type = 0.10
+country_operator = 0.05
+
+[scoring.altitude_bands]
+bands = [
+    { min = 200, max = 600, weight = 2.0, name = "LEO" },
+    { min = 600, max = 2000, weight = 1.5, name = "Upper LEO" },
+]
+
+[scoring.object_type]
+payload = 0.3
+rocket_body = 1.0
+debris = 0.5
+unknown = 0.4
+
+[scoring.missing_data]
+strategy = "penalize"
+penalty_factor = 0.3
+median_mass_kg = 100.0
+median_size_m = 1.0
+
+[scoring.decay_timeline]
+short_decay_days = 365.0
+medium_decay_days = 1825.0
+short_decay_score = 0.1
+medium_decay_score = 0.5
+long_decay_score = 1.0

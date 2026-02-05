@@ -5,7 +5,7 @@
 //!
 //! The implementation wraps satkit's NRLMSISE-00 module.
 
-use super::{AtmosphereDensity, AtmosphereModel};
+use super::{gcrf_to_geodetic, AtmosphereDensity, AtmosphereModel};
 use crate::propagation::hifi::state::EARTH_RADIUS_M;
 use nalgebra::Vector3;
 use satkit::Instant;
@@ -55,30 +55,6 @@ impl Nrlmsise00 {
         }
     }
 
-    /// Convert GCRF position to geodetic coordinates
-    fn position_to_geodetic(&self, position: &Vector3<f64>, epoch: &Instant) -> (f64, f64, f64) {
-        // Transform GCRF to ITRF (Earth-fixed)
-        let q_gcrf_to_itrf = satkit::frametransform::qgcrf2itrf(epoch);
-        let pos_itrf = q_gcrf_to_itrf * position;
-
-        // Convert to geodetic (lat, lon, alt) - from_slice returns Result in satkit 0.9
-        let coord = satkit::itrfcoord::ITRFCoord::from_slice(&[pos_itrf.x, pos_itrf.y, pos_itrf.z])
-            .unwrap_or_else(|_| {
-                // Fallback: compute manually using simple spherical approximation
-                let r = pos_itrf.norm();
-                satkit::itrfcoord::ITRFCoord::from_geodetic_deg(
-                    (pos_itrf.z / r).asin().to_degrees(),
-                    pos_itrf.y.atan2(pos_itrf.x).to_degrees(),
-                    r - EARTH_RADIUS_M,
-                )
-            });
-
-        (
-            coord.latitude_deg(),
-            coord.longitude_deg(),
-            coord.hae(), // Height above ellipsoid in meters
-        )
-    }
 }
 
 impl AtmosphereModel for Nrlmsise00 {
@@ -94,7 +70,7 @@ impl AtmosphereModel for Nrlmsise00 {
         }
 
         // Get geodetic coordinates
-        let (lat_deg, lon_deg, alt_m) = self.position_to_geodetic(position, epoch);
+        let (lat_deg, lon_deg, alt_m) = gcrf_to_geodetic(position, epoch);
 
         // Call satkit NRLMSISE-00
         // satkit 0.9 API: nrlmsise(alt_km, lat_deg?, lon_deg?, time?, use_spaceweather) -> (rho, temp)

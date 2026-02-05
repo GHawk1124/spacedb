@@ -3,10 +3,9 @@
 //! Orchestrates the numerical integration with configurable force models
 //! to produce accurate orbital predictions.
 
-use super::forces::{CompositeForce, ForceModel};
+use super::forces::CompositeForce;
 use super::integrator::{Integrator, StepResult};
 use super::state::{OrbitalState, SpacecraftState};
-use nalgebra::Vector3;
 use satkit::{Duration, Instant};
 
 /// Result of orbit propagation

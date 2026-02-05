@@ -1,0 +1,104 @@
+# Value Analysis Configuration - LEO Debris Scoring
+# This config scores debris objects for deorbit priority
+
+[metadata]
+name = "Default LEO Debris Scoring"
+version = "1.0"
+
+[filter]
+# Object types to include (empty = all)
+object_types = ["DEBRIS", "ROCKET BODY"]
+# Countries to include (empty = all)
+countries = []
+# Only include objects with valid TLE
+has_tle_only = true
+# Exclude objects that have already decayed
+exclude_decayed = true
+# Altitude filtering
+altitude_filter_enabled = true
+altitude_min_km = 200.0
+altitude_max_km = 2000.0
+# Size/mass filters (requires DISCOS data)
+size_filter_enabled = false
+size_min_m = 0.0
+size_max_m = 0.0
+include_unknown_size = true
+mass_filter_enabled = false
+mass_min_kg = 0.0
+mass_max_kg = 0.0
+include_unknown_mass = true
+
+[decay]
+# Propagator: native-rk4, satkit-rk98
+propagator = "satkit-rk98"
+# Atmosphere model: nrlmsise00, jb2008, harris-priester, exponential
+atmosphere = "exponential"
+# Lookup table accuracy: low, medium, high (only for *-lookup)
+lookup_accuracy = "medium"
+# Gravity model: point-mass, j2, full-field-20
+gravity = "j2"
+# Prediction horizon in days (30 days for testing, use 3650 for production)
+horizon_days = 30.0
+# Include solar radiation pressure
+include_srp = false
+# Include third-body perturbations (Sun/Moon)
+include_third_body = false
+
+[collision]
+# Propagator: sgp4 (fast), native-rk4, satkit-rk98
+propagator = "satkit-rk98"
+# Atmosphere model (HiFi only): nrlmsise00, jb2008, harris-priester, exponential, or *-lookup
+atmosphere = "harris-priester"
+# Lookup table accuracy: low, medium, high (only for *-lookup)
+lookup_accuracy = "medium"
+# Analysis horizon in hours (1 week)
+hours = 168.0
+# Distance threshold for close approaches (km)
+distance_threshold_km = 10.0
+
+[scoring.weights]
+# Weight for mass/size component (larger = more fragments on breakup)
+mass_size = 0.25
+# Weight for collision risk (close approaches, velocity)
+collision_risk = 0.35
+# Weight for decay timeline (won't decay naturally = higher priority)
+decay_timeline = 0.25
+# Weight for object type (rocket bodies = higher priority)
+object_type = 0.10
+# Weight for country/operator (optional geopolitical weighting)
+country_operator = 0.05
+
+[scoring.altitude_bands]
+# Altitude bands with congestion-based multipliers
+bands = [
+    { min = 200, max = 450, weight = 1.5, name = "Very Low LEO" },
+    { min = 450, max = 600, weight = 2.0, name = "Dense LEO (Starlink)" },
+    { min = 600, max = 800, weight = 1.8, name = "Sun-Sync LEO" },
+    { min = 800, max = 2000, weight = 1.2, name = "Upper LEO" },
+]
+
+[scoring.object_type]
+# Object type scoring (higher = more priority)
+payload = 0.3
+rocket_body = 1.0
+debris = 0.5
+unknown = 0.4
+
+[scoring.missing_data]
+# How to handle objects without DISCOS physical data
+# Options: "penalize", "median", "exclude"
+strategy = "penalize"
+# Multiplier for mass_size score when data is missing (if strategy = "penalize")
+penalty_factor = 0.3
+# Fallback values if strategy = "median"
+median_mass_kg = 100.0
+median_size_m = 1.0
+
+[scoring.decay_timeline]
+# Decay timeline scoring thresholds
+short_decay_days = 365.0     # Objects decaying within 1 year
+medium_decay_days = 3650.0   # Objects decaying within 10 years
+# Scores for each category (lower = less priority since they'll decay naturally)
+short_decay_score = 0.1
+medium_decay_score = 0.5
+long_decay_score = 1.0       # Won't decay naturally - highest priority

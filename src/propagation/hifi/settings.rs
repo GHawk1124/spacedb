@@ -1,6 +1,6 @@
 //! Configuration helpers for high-fidelity propagation
 
-use super::atmosphere::AtmosphereModelType;
+use super::atmosphere::{AtmosphereModelType, LookupAccuracy};
 use super::forces::{
     AtmosphericDrag, CompositeForce, EarthGravity, EphemerisType, GravityModel,
     SolarRadiationPressure, ThirdBody,
@@ -214,6 +214,7 @@ pub struct HiFiSettings {
     /// Prefer using `propagator` field for new code
     pub integrator: IntegratorType,
     pub atmosphere: AtmosphereModelType,
+    pub lookup_accuracy: LookupAccuracy,
     pub gravity: GravityModelChoice,
     pub include_srp: bool,
     pub include_third_body: bool,
@@ -226,9 +227,10 @@ pub struct HiFiSettings {
 impl Default for HiFiSettings {
     fn default() -> Self {
         Self {
-            propagator: PropagatorType::Sgp4,
-            integrator: IntegratorType::NativeRk4,
+            propagator: PropagatorType::SatkitRk98,
+            integrator: IntegratorType::SatkitRk98,
             atmosphere: AtmosphereModelType::Nrlmsise00,
+            lookup_accuracy: LookupAccuracy::Medium,
             gravity: GravityModelChoice::FullField20,
             include_srp: true,
             include_third_body: true,
@@ -243,7 +245,9 @@ impl HiFiSettings {
     pub fn build_forces(&self) -> CompositeForce {
         let mut forces = CompositeForce::new();
         forces.add(Box::new(EarthGravity::from_model(self.gravity.to_model())));
-        forces.add(Box::new(AtmosphericDrag::new(self.atmosphere.create())));
+        forces.add(Box::new(AtmosphericDrag::new(
+            self.atmosphere.create_with_accuracy(self.lookup_accuracy),
+        )));
 
         if self.include_srp {
             forces.add(Box::new(SolarRadiationPressure::new()));

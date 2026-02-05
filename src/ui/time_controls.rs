@@ -3,7 +3,7 @@
 use egui::Ui;
 
 use crate::propagation::hifi::{
-    AtmosphereModelType, GravityModelChoice, HiFiSettings, PropagatorType,
+    AtmosphereModelType, GravityModelChoice, HiFiSettings, LookupAccuracy, PropagatorType,
 };
 
 /// Time control state
@@ -133,14 +133,36 @@ impl TimeControls {
                     .show_ui(ui, |ui| {
                         for option in [
                             AtmosphereModelType::Nrlmsise00,
+                            AtmosphereModelType::Nrlmsise00Lookup,
                             AtmosphereModelType::Jb2008,
+                            AtmosphereModelType::Jb2008Lookup,
                             AtmosphereModelType::HarrisPriester,
+                            AtmosphereModelType::HarrisPriesterLookup,
                             AtmosphereModelType::Exponential,
+                            AtmosphereModelType::ExponentialLookup,
                         ] {
                             ui.selectable_value(&mut hifi_settings.atmosphere, option, option.name());
                         }
                     });
             });
+
+            if hifi_settings.atmosphere.is_lookup() {
+                ui.horizontal(|ui| {
+                    ui.label("Lookup Accuracy");
+                    egui::ComboBox::from_id_salt("hifi_atmosphere_lookup")
+                        .selected_text(hifi_settings.lookup_accuracy.name())
+                        .show_ui(ui, |ui| {
+                            for option in LookupAccuracy::all() {
+                                let response = ui.selectable_value(
+                                    &mut hifi_settings.lookup_accuracy,
+                                    *option,
+                                    option.name(),
+                                );
+                                response.on_hover_text(option.description());
+                            }
+                        });
+                });
+            }
 
             ui.horizontal(|ui| {
                 ui.label("Gravity");

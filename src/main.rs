@@ -42,6 +42,8 @@ enum Command {
     Collisions(analysis::CollisionArgs),
     /// Run decay prediction analysis without rendering
     Decay(analysis::DecayArgs),
+    /// Run debris value analysis for deorbit prioritization
+    Value(analysis::ValueArgs),
 }
 
 #[derive(Debug)]
@@ -1438,6 +1440,7 @@ fn main() -> Result<()> {
         match command {
             Command::Collisions(args) => return analysis::run_collision_scan(args),
             Command::Decay(args) => return analysis::run_decay_prediction(args),
+            Command::Value(args) => return analysis::run_value_analysis(args),
         }
     }
 
